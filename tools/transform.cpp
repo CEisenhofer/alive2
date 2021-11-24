@@ -4,6 +4,7 @@
 #include "tools/transform.h"
 #include "ir/globals.h"
 #include "ir/state.h"
+#include "smt/ctx.h"
 #include "smt/expr.h"
 #include "smt/smt.h"
 #include "smt/solver.h"
@@ -20,6 +21,10 @@
 #include <sstream>
 #include <unordered_map>
 
+typedef const char *Z3_string;
+
+Z3_string Z3_ast_to_string(Z3_context c, Z3_ast a);
+
 using namespace IR;
 using namespace smt;
 using namespace tools;
@@ -27,6 +32,10 @@ using namespace util;
 using namespace std;
 using util::config::dbg;
 
+std::size_t
+std::hash<tools::BlockFieldInfo>::operator()(const tools::BlockFieldInfo &k) const {
+  return (k.bid << 2) | k.field;
+}
 
 static bool is_arbitrary(const expr &e) {
   if (e.isConst())
@@ -386,22 +395,29 @@ static expr encode_undef_refinement(const Type &type, const State::ValTy &a,
                                           expr(b.val.value), subst(b));
 }
 
-static void
-check_refinement(Errors &errs, const Transform &t, const State &src_state,
-                 const State &tgt_state, const Value *var, const Type &type,
-                 const expr &fndom_a, const State::ValTy &ap,
-                 const expr &fndom_b, const State::ValTy &bp,
-                 bool check_each_var) {
-  if (check_expr(!src_state.sinkDomain()).isUnsat()) {
+static void check_refinement(Errors &errs, const Transform &t,
+                             const State &src_state, const State &tgt_state,
+                             const Value *var, const Type &type,
+                             const expr &fndom_a, const State::ValTy &ap,
+                             const expr &fndom_b, const State::ValTy &bp,
+                             bool check_each_var) {
+
+  if (MemoryAxiomPropagator::check_expr(
+          src_state.getMemory(), tgt_state.getMemory(), !src_state.sinkDomain())
+          .isUnsat()) {
     errs.add("The source program doesn't reach a return instruction.\n"
-             "Consider increasing the unroll factor if it has loops", false);
+             "Consider increasing the unroll factor if it has loops",
+             false);
     return;
   }
 
   auto sink_tgt = tgt_state.sinkDomain();
-  if (check_expr(!sink_tgt).isUnsat()) {
+  if (MemoryAxiomPropagator::check_expr(src_state.getMemory(),
+                                        tgt_state.getMemory(), !sink_tgt)
+          .isUnsat()) {
     errs.add("The target program doesn't reach a return instruction.\n"
-             "Consider increasing the unroll factor if it has loops", false);
+             "Consider increasing the unroll factor if it has loops",
+             false);
     return;
   }
 
@@ -422,8 +438,8 @@ check_refinement(Errors &errs, const Transform &t, const State &src_state,
   // note that precondition->toSMT() may add stuff to getPre,
   // so order here matters
   // FIXME: broken handling of transformation precondition
-  //src_state.startParsingPre();
-  //expr pre = t.precondition ? t.precondition->toSMT(src_state) : true;
+  // src_state.startParsingPre();
+  // expr pre = t.precondition ? t.precondition->toSMT(src_state) : true;
   auto pre_src_and = src_state.getPre();
   auto &pre_tgt_and = tgt_state.getPre();
 
@@ -435,16 +451,19 @@ check_refinement(Errors &errs, const Transform &t, const State &src_state,
   expr axioms_expr = axioms();
   pre_tgt &= !sink_tgt;
 
-  if (check_expr(axioms_expr && (pre_src && pre_tgt)).isUnsat()) {
+  if (MemoryAxiomPropagator::check_expr(src_state.getMemory(),
+                                        tgt_state.getMemory(),
+                                        axioms_expr && (pre_src && pre_tgt))
+          .isUnsat()) {
     errs.add("Precondition is always false", false);
     return;
   }
 
   expr pre_src_exists, pre_src_forall;
   {
-    vector<pair<expr,expr>> repls;
+    vector<pair<expr, expr>> repls;
     auto vars_pre = pre_src.vars();
-    for (auto &v : qvars) {
+    for (auto &v: qvars) {
       if (vars_pre.count(v))
         repls.emplace_back(v, expr::mkFreshVar("#exists", v));
     }
@@ -465,26 +484,27 @@ check_refinement(Errors &errs, const Transform &t, const State &src_state,
       return move(refines);
 
     return axioms_expr &&
-            preprocess(t, qvars, uvars, pre && pre_src_forall.implies(refines));
+           preprocess(t, qvars, uvars, pre && pre_src_forall.implies(refines));
   };
 
   auto check = [&](expr &&e, auto &&printer, const char *msg) {
     e = mk_fml(move(e));
-    auto res = check_expr(e);
-    if (!res.isUnsat() &&
-        !error(errs, src_state, tgt_state, res, var, msg, check_each_var,
-               printer))
+    auto res = MemoryAxiomPropagator::check_expr(src_state.getMemory(),
+                                                 tgt_state.getMemory(), e);
+    if (!res.isUnsat() && !error(errs, src_state, tgt_state, res, var, msg,
+                                 check_each_var, printer))
       return false;
     return true;
   };
 
-#define CHECK(fml, printer, msg) \
-  if (!check(fml, printer, msg)) \
-    return
+#define CHECK(fml, printer, msg)                                               \
+  if (!check(fml, printer, msg))                                               \
+  return
 
   // 1. Check UB
-  CHECK(fndom_a.notImplies(fndom_b),
-        [](ostream&, const Model&){}, "Source is more defined than target");
+  CHECK(
+          fndom_a.notImplies(fndom_b), [](ostream &, const Model &) {},
+          "Source is more defined than target");
 
   // 2. Check return domain (noreturn check)
   {
@@ -1449,6 +1469,182 @@ void Transform::print(ostream &os, const TransformPrintOpts &opt) const {
 ostream& operator<<(ostream &os, const Transform &t) {
   t.print(os, {});
   return os;
+}
+
+MemoryAxiomPropagator::MemoryAxiomPropagator(const Memory &src_memory,
+                                             const Memory &tgt_memory)
+        : smt::Solver(true), smt::PropagatorBase(this), src_memory(src_memory),
+          tgt_memory(tgt_memory) {
+  register_fixed();
+  register_final();
+
+  registerBlocks();
+}
+
+#define EXTRACT_BITS_MASK(to, from) (((to) >= 63ULL ? ULLONG_MAX : ((1ULL << (((to) - (from)) + 1)) - 1ULL)) << (from))
+#define EXTRACT_BITS(x, to, from) (((x) & (EXTRACT_BITS_MASK(to, from))) >> (from))
+#define EXTRACT_FIRST_BITS_MASK(k) EXTRACT_BITS_MASK(((k) - 1), 0)
+#define EXTRACT_FIRST_BITS(x, k) ((x) & (EXTRACT_FIRST_BITS_MASK(k)))
+
+void MemoryAxiomPropagator::registerBlocks() {
+
+  if (num_locals_src == 0 && num_locals_tgt == 0 && num_nonlocals == 0)
+    return;
+
+  if (!observes_addresses)
+    return;
+
+  if (has_null_block)
+    add(Pointer::mkNullPointer(src_memory).getAddress(false) == 0);
+
+  for (unsigned bid = has_null_block; bid < num_nonlocals; ++bid) {
+    if (src_memory.noAxiomBid(bid, tgt_memory))
+      continue;
+
+    Pointer ptr(src_memory, bid, false);
+    expr addr = ptr.getAddress();
+    expr size = ptr.blockSize();
+    expr align = ptr.blockAlignment();
+
+    unsigned id;
+    BlockFieldInfo addrInfo(BlockFieldInfo::BlockFieldInfoEnum::BlockAddress, bid);
+    BlockFieldInfo sizeInfo(BlockFieldInfo::BlockFieldInfoEnum::BlockSize, bid);
+    uint64_t addrValue, sizeValue;
+
+    bool bothConst = true;
+
+    if (!addr.isUInt(addrValue)) {
+      id = register_expr(addr);
+      idToFieldMapping[id] = addrInfo;
+      fieldToIdMapping[addrInfo] = id;
+      bothConst = false;
+    } else {
+      model[addrInfo] = addrValue;
+      fixedValues.push_back(addrInfo);
+    }
+    if (!size.isUInt(sizeValue)) {
+      id = register_expr(size);
+      idToFieldMapping[id] = sizeInfo;
+      fieldToIdMapping[sizeInfo] = id;
+      bothConst = false;
+    } else {
+      model[sizeInfo] = sizeValue;
+      fixedValues.push_back(sizeInfo);
+    }
+
+    if (bothConst) {
+      util::Interval<uint64_t, unsigned> interval(addrValue,
+                                                  addrValue + EXTRACT_FIRST_BITS(sizeValue, bits_ptr_address));
+      if (interval.isPositive()) {
+        interval.tag = bid;
+        bool intersects = blockIntervals.addOrIntersect(interval, nullptr);
+        assert(!intersects);
+        intervalValues.push_back(interval);
+      }
+    }
+
+    BlockData data(bid, addr, size, align);
+    bidToExprMapping[bid] = data;
+  }
+}
+
+void MemoryAxiomPropagator::push() {
+  fixedCnt.push((unsigned)model.size());
+  intervalCnt.push((unsigned)intervalValues.size());
+}
+
+void MemoryAxiomPropagator::pop(unsigned int num_scopes) {
+  for (unsigned i = 0; i < num_scopes; i++) {
+    unsigned previousFixedCnt = fixedCnt.top();
+    unsigned previousIntervalCnt = intervalCnt.top();
+    fixedCnt.pop();
+    intervalCnt.pop();
+    for (auto j = fixedValues.size(); j > previousFixedCnt; j--) {
+      size_t sz = model.size();
+      size_t removed = model.erase(fixedValues[j - 1]);
+      assert(sz == model.size() + 1 && removed == 1);
+    }
+    for (auto j = intervalValues.size(); j > previousIntervalCnt; j--) {
+      size_t sz = blockIntervals.size();
+      size_t removed = blockIntervals.erase(intervalValues[j - 1]);
+      assert(sz == blockIntervals.size() + 1 && removed == 1);
+    }
+    fixedValues.resize(previousFixedCnt);
+    intervalValues.resize(previousIntervalCnt);
+  }
+}
+
+void MemoryAxiomPropagator::fixed(unsigned int i, const expr &expr) {
+  BlockFieldInfo blockInfo = idToFieldMapping.at(i);
+  uint64_t value;
+  if (!expr.isUInt(value)) {
+    assert(0);
+  }
+
+  model[blockInfo] = value;
+  fixedValues.push_back(blockInfo);
+
+  // Ordinary addresses may not be zero
+  if (blockInfo.field == BlockFieldInfo::BlockFieldInfoEnum::BlockAddress && value == 0) {
+    this->conflict(1, &i);
+    return;
+  }
+
+  Interval<uint64_t, unsigned> interval;
+  uint64_t addr, size;
+  bool foundInterval = false;
+
+  // Add interval and check if addresses are disjoint
+  if (blockInfo.field == BlockFieldInfo::BlockFieldInfoEnum::BlockAddress) {
+    addr = value;
+    BlockFieldInfo sizeInfo(BlockFieldInfo::BlockFieldInfoEnum::BlockSize, blockInfo.bid);
+    auto found = model.find(sizeInfo);
+    // Check if size is already fixed
+    if (found != model.end()) {
+      size = found->second;
+      foundInterval = true;
+    }
+  } else if (blockInfo.field == BlockFieldInfo::BlockFieldInfoEnum::BlockSize) {
+    size = value;
+    BlockFieldInfo addrInfo(BlockFieldInfo::BlockFieldInfoEnum::BlockAddress, blockInfo.bid);
+    auto found = model.find(addrInfo);
+    // Check if address is already fixed
+    if (found != model.end()) {
+      addr = found->second;
+      foundInterval = true;
+    }
+  }
+
+  if (foundInterval) {
+    BlockData d1 = bidToExprMapping[blockInfo.bid];
+    util::Interval<uint64_t, unsigned> add(addr, addr + EXTRACT_FIRST_BITS(size, bits_ptr_address));
+    if ((!Pointer::hasLocalBit() || EXTRACT_BITS(interval.end, bits_ptr_address - 1, bits_ptr_address - 1) != 0) &&
+        !add.isNegative()) {
+      add.tag = blockInfo.bid;
+      util::Interval<uint64_t, unsigned> collision;
+      // Check for block collisions
+      if (blockIntervals.addOrIntersect(add, &collision)) {
+        BlockData d2 = bidToExprMapping[collision.tag];
+        this->propagate(0, nullptr, IR::disjointBlocks(
+                d1.addr, d1.size.zextOrTrunc(bits_ptr_address),
+                d1.align, d2.addr, d2.size.zextOrTrunc(bits_ptr_address), d2.align));
+      } else {
+        intervalValues.push_back(add);
+        interval = add;
+      }
+    } else {
+      this->propagate(0, nullptr,
+                      Pointer::hasLocalBit()
+                      // don't spill to local addr section
+                      ? (d1.addr + d1.size).extract(bits_ptr_address - 1, bits_ptr_address - 1) == 0
+                      : d1.addr.add_no_uoverflow(d1.size)
+      );
+    }
+  }
+
+}
+
+void MemoryAxiomPropagator::final() {
 }
 
 }

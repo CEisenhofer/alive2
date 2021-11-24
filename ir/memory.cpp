@@ -133,8 +133,9 @@ static bool align_ge_size(const expr &align, const expr &size) {
 }
 
 // Assumes that both begin + len don't overflow
-static expr disjoint(const expr &begin1, const expr &len1, const expr &align1,
-                     const expr &begin2, const expr &len2, const expr &align2) {
+smt::expr IR::disjointBlocks(
+        const smt::expr &begin1, const smt::expr &len1, const smt::expr &align1,
+        const smt::expr &begin2, const smt::expr &len2, const smt::expr &align2) {
   // if blocks have the same alignment they can't start in the middle of
   // each other. We just need to ensure they have a different addr.
   if (align1.eq(align2) && align_ge_size(align1, len1) &&
@@ -1098,82 +1099,110 @@ Memory::Memory(State &state) : state(&state), escaped_local_blks(*this) {
     alloc(expr::mkUInt(0, bits_size_t), bits_byte / 8, GLOBAL, false, false, 0);
 }
 
+bool Memory::noAxiomBid(unsigned bid, const Memory &tgt) const {
+  if (is_globalvar(bid, true))
+    return false;
+  if (is_fncall_mem(bid))
+    return true;
+  return bid >= tgt.next_nonlocal_bid;
+};
+
 void Memory::mkAxioms(const Memory &tgt) const {
   assert(state->isSource() && !tgt.state->isSource());
   if (memory_unused())
     return;
 
-  auto skip_bid = [&](unsigned bid) {
-    if (is_globalvar(bid, true))
-      return false;
-    if (is_fncall_mem(bid))
-      return true;
-    return bid >= tgt.next_nonlocal_bid;
-  };
-
   // transformation can increase alignment
   expr align = expr::mkUInt(ilog2(heap_block_alignment), 6);
 
   for (unsigned bid = has_null_block; bid < num_nonlocals_src; ++bid) {
-    if (skip_bid(bid))
+    if (noAxiomBid(bid, tgt))
       continue;
     Pointer p(*this, bid, false);
     Pointer q(tgt, bid, false);
     auto p_align = p.blockAlignment();
     auto q_align = q.blockAlignment();
     state->addAxiom(
-      p.isHeapAllocated().implies(p_align == align && q_align == align));
+       p.isHeapAllocated().implies(p_align == align && q_align == align));
     if (!p_align.isConst() || !q_align.isConst())
       state->addAxiom(p_align.ule(q_align));
   }
   for (unsigned bid = num_nonlocals_src; bid < num_nonlocals; ++bid) {
-    if (skip_bid(bid))
+    if (noAxiomBid(bid, tgt))
       continue;
     Pointer q(tgt, bid, false);
     state->addAxiom(q.isHeapAllocated().implies(q.blockAlignment() == align));
   }
-
-  if (!observesAddresses())
-    return;
-
-  if (has_null_block)
-    state->addAxiom(Pointer::mkNullPointer(*this).getAddress(false) == 0);
-
-  // Non-local blocks are disjoint.
-  // Ignore null pointer block
-  for (unsigned bid = has_null_block; bid < num_nonlocals; ++bid) {
-    if (skip_bid(bid))
-      continue;
-
-    Pointer p1(*this, bid, false);
-    auto addr  = p1.getAddress();
-    auto sz    = p1.blockSize().zextOrTrunc(bits_ptr_address);
-    auto align = p1.blockAlignment();
-
-    state->addAxiom(addr != 0);
-
-    // Ensure block ptr doesn't overflow
-    // Note: the aligned case is handled in alloc()
-    if (!align_ge_size(align, sz)) {
-      auto msb_bit = bits_ptr_address - 1;
-      state->addAxiom(
-        Pointer::hasLocalBit()
-          // don't spill to local addr section
-          ? (addr + sz).extract(msb_bit, msb_bit) == 0
-          : addr.add_no_uoverflow(sz));
-    }
-
-    // disjointness constraint
-    for (unsigned bid2 = bid + 1; bid2 < num_nonlocals; ++bid2) {
-      if (skip_bid(bid2))
-        continue;
-      Pointer p2(*this, bid2, false);
-      state->addAxiom(disjoint(addr, sz, align, p2.getAddress(),
-                               p2.blockSize().zextOrTrunc(bits_ptr_address),
-                               p2.blockAlignment()));
-    }
-  }
 }
+
+// void Memory::mkAxioms(const Memory &tgt) const {
+//   assert(state->isSource() && !tgt.state->isSource());
+//   if (memory_unused())
+//     return;
+//
+//   // transformation can increase alignment
+//   expr align = expr::mkUInt(ilog2(heap_block_alignment), 6);
+//
+//   for (unsigned bid = has_null_block; bid < num_nonlocals_src; ++bid) {
+//     if (noAxiomBid(bid, tgt))
+//       continue;
+//     Pointer p(*this, bid, false);
+//     Pointer q(tgt, bid, false);
+//     auto p_align = p.blockAlignment();
+//     auto q_align = q.blockAlignment();
+//     state->addAxiom(
+//             p.isHeapAllocated().implies(p_align == align && q_align == align));
+//     if (!p_align.isConst() || !q_align.isConst())
+//       state->addAxiom(p_align.ule(q_align));
+//   }
+//   for (unsigned bid = num_nonlocals_src; bid < num_nonlocals; ++bid) {
+//     if (noAxiomBid(bid, tgt))
+//       continue;
+//     Pointer q(tgt, bid, false);
+//     state->addAxiom(q.isHeapAllocated().implies(q.blockAlignment() == align));
+//   }
+//
+//   if (!observesAddresses())
+//     return;
+//
+//   if (has_null_block)
+//     state->addAxiom(Pointer::mkNullPointer(*this).getAddress(false) == 0);
+//
+//   // Non-local blocks are disjoint.
+//   // Ignore null pointer block
+//   for (unsigned bid = has_null_block; bid < num_nonlocals; ++bid) {
+//     if (noAxiomBid(bid, tgt))
+//       continue;
+//
+//     Pointer p1(*this, bid, false);
+//     auto addr  = p1.getAddress();
+//     auto sz    = p1.blockSize().zextOrTrunc(bits_ptr_address);
+//     auto align = p1.blockAlignment();
+//
+//     state->addAxiom(addr != 0);
+//
+//     // Ensure block ptr doesn't overflow
+//     // Note: the aligned case is handled in alloc()
+//     if (!align_ge_size(align, sz)) {
+//       auto msb_bit = bits_ptr_address - 1;
+//       state->addAxiom(
+//               Pointer::hasLocalBit()
+//               // don't spill to local addr section
+//               ? (addr + sz).extract(msb_bit, msb_bit) == 0
+//               : addr.add_no_uoverflow(sz));
+//     }
+//
+//     // disjointness constraint
+//     for (unsigned bid2 = bid + 1; bid2 < num_nonlocals; ++bid2) {
+//       if (noAxiomBid(bid2, tgt))
+//         continue;
+//       Pointer p2(*this, bid2, false);
+//       state->addAxiom(disjoint(addr, sz, align, p2.getAddress(),
+//                                p2.blockSize().zextOrTrunc(bits_ptr_address),
+//                                p2.blockAlignment()));
+//     }
+//   }
+// }
 
 void Memory::resetGlobals() {
   Pointer::resetGlobals();
@@ -1429,7 +1458,7 @@ static expr disjoint_local_blocks(const Memory &m, const expr &addr,
   for (auto &[sbid, addr0] : blk_addr) {
     Pointer p2(m, Pointer::mkLongBid(sbid, true), zero);
     disj &= p2.isBlockAlive()
-              .implies(disjoint(addr, sz, align, p2.getAddress(),
+              .implies(disjointBlocks(addr, sz, align, p2.getAddress(),
                                 p2.blockSize().zextOrTrunc(bits_ptr_address),
                                 p2.blockAlignment()));
   }

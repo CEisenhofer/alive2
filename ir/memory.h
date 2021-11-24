@@ -17,13 +17,18 @@
 #include <utility>
 #include <vector>
 
-namespace smt { class Model; }
+namespace smt {
+class Model;
+}
+
+namespace tools {
+class MemoryAxiomPropagator;
+};
 
 namespace IR {
 
 class Memory;
 class State;
-
 
 // A data structure that represents a byte.
 // A byte is either a pointer byte or a non-pointer byte.
@@ -205,6 +210,8 @@ class Memory {
                              const smt::expr &short_bid,
                              const smt::expr &size, const smt::expr &align,
                              unsigned align_bits);
+  
+  bool noAxiomBid(unsigned bid, const Memory& tgt) const;
 
 public:
   enum BlockKind {
@@ -330,6 +337,10 @@ public:
   friend std::ostream& operator<<(std::ostream &os, const Memory &m);
 
   friend class Pointer;
+  friend tools::MemoryAxiomPropagator;
 };
+
+smt::expr disjointBlocks(const smt::expr &begin1, const smt::expr &len1, const smt::expr &align1,
+                   const smt::expr &begin2, const smt::expr &len2, const smt::expr &align2);
 
 }

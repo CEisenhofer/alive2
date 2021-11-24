@@ -1101,7 +1101,7 @@ public:
         attrs.blockSize = max(attrs.blockSize, asz.getKnownMinSize());
 
         attrs.set(ParamAttrs::Align);
-        attrs.align = max(attrs.align, DL().getABITypeAlignment(ty));
+        attrs.align = max(attrs.align, (uint64_t)DL().getABITypeAlignment(ty));
         continue;
       }
 

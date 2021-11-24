@@ -7,10 +7,20 @@
 #include "ir/state.h"
 #include "smt/solver.h"
 #include "util/errors.h"
+#include "util/interval_tree.h"
 #include <memory>
-#include <string>
 #include <ostream>
 #include <unordered_map>
+#include <stack>
+
+namespace tools {
+struct BlockFieldInfo;
+}
+
+template<>
+struct std::hash<tools::BlockFieldInfo> {
+  std::size_t operator()(const tools::BlockFieldInfo &k) const;
+};
 
 namespace tools {
 
@@ -18,15 +28,16 @@ struct TransformPrintOpts {
   bool print_fn_header = true;
 };
 
-
 struct Transform {
   std::string name;
   IR::Function src, tgt;
   IR::Predicate *precondition = nullptr;
 
   void preprocess();
+
   void print(std::ostream &os, const TransformPrintOpts &opt) const;
-  friend std::ostream& operator<<(std::ostream &os, const Transform &t);
+
+  friend std::ostream &operator<<(std::ostream &os, const Transform &t);
 };
 
 
@@ -65,4 +76,104 @@ void print_model_val(std::ostream &os, const IR::State &st, const smt::Model &m,
                      const IR::Value *var, const IR::Type &type,
                      const IR::StateValue &val, unsigned child = 0);
 
-}
+struct BlockFieldInfo {
+
+  enum BlockFieldInfoEnum : unsigned char {
+    None = 0,
+    BlockAddress = 1,
+    BlockSize = 2,
+  };
+
+  BlockFieldInfoEnum field;
+  unsigned bid;
+
+  BlockFieldInfo() : field(None), bid(0) {}
+
+  BlockFieldInfo(const BlockFieldInfo &) = default;
+
+  BlockFieldInfo(BlockFieldInfoEnum field, unsigned bid) : field(field), bid(bid) {}
+
+
+  bool operator==(const BlockFieldInfo &other) const {
+    return field == other.field && bid == other.bid;
+  }
+
+  std::string toString() {
+    return "Bid: " + std::to_string(bid) + "; " + (field == None ? "None" : field == BlockAddress ? "Address" : "Size");
+  }
+};
+
+struct BlockData {
+
+  unsigned bid;
+  smt::expr addr;
+  smt::expr size;
+  smt::expr align;
+
+  BlockData() : bid(UINT32_MAX) {}
+
+  BlockData(unsigned int bid, const smt::expr &addr, const smt::expr &size, const smt::expr &align)
+          : bid(bid), addr(addr), size(size), align(align) {}
+
+  BlockData(const BlockData &) = default;
+
+  std::string toString() {
+    return "Block: " + std::to_string(bid) +
+           "; addr: " + addr.toString() + "; size: " + size.toString() + "; align: " + align.toString();
+  }
+};
+
+class MemoryAxiomPropagator : public smt::Solver, smt::PropagatorBase {
+
+  const IR::Memory &src_memory, &tgt_memory;
+
+  std::unordered_map<unsigned, BlockFieldInfo>
+          idToFieldMapping; // Maps Z3 propagator id -> block information field (inverse from fieldToIdMapping)
+  std::unordered_map<BlockFieldInfo, unsigned>
+          fieldToIdMapping; // Maps block information field -> Z3 propagator id (inverse from idToFieldMapping)
+  std::unordered_map<unsigned, BlockData> bidToExprMapping; // Maps bid to the z3 expressions
+
+  // TODO: Make it work for more than 64 bit (arbitrary integers: performance problem)
+  std::unordered_map<BlockFieldInfo, uint64_t>
+          model; // Maps bid field information -> value of that field
+
+  std::vector<BlockFieldInfo> fixedValues; // The fixed values in the order they were assigned
+  std::vector<util::Interval<uint64_t, unsigned>> intervalValues; // The complete memory-blocks in the order they were completed
+
+  std::stack<unsigned> fixedCnt; // Number of fixed values per decision level
+  std::stack<unsigned> intervalCnt; // Number of complete memory-blocks per decision level
+
+  // The addresses + sizes in the memory (used for block disjointness)
+  // Tag: bid (unsigned)
+  util::IntervalTree<uint64_t, unsigned> blockIntervals;
+
+  void registerBlocks();
+
+public:
+  MemoryAxiomPropagator(const IR::Memory &src_memory,
+                        const IR::Memory &tgt_memory);
+
+  ~MemoryAxiomPropagator() override = default;
+
+  void push() override;
+
+  void pop(unsigned num_scopes) override;
+
+  PropagatorBase *fresh(Z3_context ctx) override {
+    return this;
+  }
+
+  void fixed(unsigned int i, const smt::expr &expr) override;
+
+  void final() override;
+
+  static smt::Result check_expr(const IR::Memory &src_memory,
+                                const IR::Memory &tgt_memory,
+                                const smt::expr &e) {
+    MemoryAxiomPropagator s(src_memory, tgt_memory);
+    s.add(e);
+    return s.check();
+  }
+};
+
+} // namespace tools

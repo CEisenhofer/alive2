@@ -8,11 +8,15 @@
 #include <ostream>
 #include <string>
 #include <utility>
+#include <functional>
 
 typedef struct _Z3_model* Z3_model;
 typedef struct _Z3_solver* Z3_solver;
+typedef struct _Z3_solver_callback* Z3_solver_callback;
 
 namespace smt {
+
+class PropagatorBase;
 
 class Model {
   Z3_model m;
@@ -107,6 +111,7 @@ public:
   Result check() const;
 
   friend class SolverPush;
+  friend class PropagatorBase;
 };
 
 Result check_expr(const expr &e);
@@ -120,6 +125,91 @@ public:
   ~SolverPush();
 };
 
+class PropagatorBase {
+
+  typedef std::function<void(unsigned, expr const &)> fixed_eh_t;
+  typedef std::function<void(void)> final_eh_t;
+  typedef std::function<void(unsigned, unsigned)> eq_eh_t;
+
+  final_eh_t m_final_eh;
+  eq_eh_t m_eq_eh;
+  fixed_eh_t m_fixed_eh;
+  Solver *s;
+  Z3_solver_callback cb { nullptr };
+
+  struct scoped_cb {
+    PropagatorBase &p;
+    scoped_cb(void *_p, Z3_solver_callback cb)
+        : p(*static_cast<PropagatorBase *>(_p)) {
+      p.cb = cb;
+    }
+    ~scoped_cb() {
+      p.cb = nullptr;
+    }
+  };
+
+  static void push_eh(void *p) {
+    static_cast<PropagatorBase *>(p)->push();
+  }
+
+  static void pop_eh(void *p, unsigned num_scopes) {
+    static_cast<PropagatorBase *>(p)->pop(num_scopes);
+  }
+
+  static void *fresh_eh(void *p, Z3_context context) {
+    return static_cast<PropagatorBase *>(p)->fresh(context);
+  }
+
+  static void fixed_eh(void *_p, Z3_solver_callback cb, unsigned id,
+                       Z3_ast _value) {
+    PropagatorBase *p = static_cast<PropagatorBase *>(_p);
+    scoped_cb _cb(p, cb);
+    expr value(_value);
+    static_cast<PropagatorBase *>(p)->m_fixed_eh(id, value);
+  }
+
+  static void eq_eh(void *p, Z3_solver_callback cb, unsigned x, unsigned y) {
+    scoped_cb _cb(p, cb);
+    static_cast<PropagatorBase *>(p)->m_eq_eh(x, y);
+  }
+
+  static void final_eh(void *p, Z3_solver_callback cb) {
+    scoped_cb _cb(p, cb);
+    static_cast<PropagatorBase *>(p)->m_final_eh();
+  }
+
+public:
+  PropagatorBase(Solver *s);
+
+  virtual void push() = 0;
+  virtual void pop(unsigned num_scopes) = 0;
+
+  virtual ~PropagatorBase() = default;
+
+  virtual PropagatorBase *fresh(Z3_context ctx) = 0;
+
+  void register_fixed();
+
+  void register_eq();
+
+  void register_final();
+
+  virtual void fixed(unsigned, expr const &) {}
+
+  virtual void eq(unsigned, unsigned) {}
+
+  virtual void final() {}
+
+  unsigned register_expr(expr const &e);
+
+  void conflict(unsigned num_fixed, unsigned const *fixed);
+
+  void propagate(unsigned num_fixed, unsigned const *fixed,
+                 expr const &conseq);
+
+  void propagate(unsigned num_fixed, unsigned const *fixed, unsigned num_eqs,
+                 unsigned const *lhs, unsigned const *rhs, expr const &conseq);
+};
 
 void solver_print_queries(bool yes);
 void solver_tactic_verbose(bool yes);

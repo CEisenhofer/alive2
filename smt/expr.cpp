@@ -354,6 +354,11 @@ expr expr::IntUMax(unsigned bits) {
   return mkInt(-1, bits);
 }
 
+std::string expr::toString() const {
+  string s = Z3_ast_to_string(ctx(), ast());
+  return s;
+}
+
 bool expr::eq(const expr &rhs) const {
   C(rhs);
   return ast() == rhs();

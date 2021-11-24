@@ -361,6 +361,56 @@ SolverPush::~SolverPush() {
   Z3_solver_pop(ctx(), s.s, 1);
 }
 
+PropagatorBase::PropagatorBase(Solver *s) : s(s) {
+  Z3_solver_propagate_init(ctx(), s->s, this, push_eh, pop_eh, fresh_eh);
+}
+
+void PropagatorBase::register_fixed() {
+  assert(s);
+  m_fixed_eh = [this](unsigned id, expr const &e) { fixed(id, e); };
+  Z3_solver_propagate_fixed(ctx(), s->s, fixed_eh);
+}
+
+void PropagatorBase::register_eq() {
+  assert(s);
+  m_eq_eh = [this](unsigned x, unsigned y) { eq(x, y); };
+  Z3_solver_propagate_eq(ctx(), s->s, eq_eh);
+}
+
+void PropagatorBase::register_final() {
+  assert(s);
+  m_final_eh = [this]() { final(); };
+  Z3_solver_propagate_final(ctx(), s->s, final_eh);
+}
+
+unsigned PropagatorBase::register_expr(const expr &e) {
+  assert(s);
+  return Z3_solver_propagate_register(ctx(), s->s, e.ast());
+}
+
+void PropagatorBase::conflict(unsigned int num_fixed,
+                              const unsigned int *fixed) {
+  assert(cb);
+  expr conseq = expr::mkFalse();
+  Z3_solver_propagate_consequence(ctx(), cb, num_fixed, fixed, 0, nullptr,
+                                  nullptr, conseq.ast());
+}
+
+void PropagatorBase::propagate(unsigned int num_fixed,
+                               const unsigned int *fixed, const expr &conseq) {
+  assert(cb);
+  Z3_solver_propagate_consequence(ctx(), cb, num_fixed, fixed, 0, nullptr,
+                                  nullptr, conseq.ast());
+}
+
+void PropagatorBase::propagate(unsigned int num_fixed,
+                               const unsigned int *fixed, unsigned int num_eqs,
+                               const unsigned int *lhs, const unsigned int *rhs,
+                               const expr &conseq) {
+  assert(cb);
+  Z3_solver_propagate_consequence(ctx(), cb, num_fixed, fixed, num_eqs, lhs,
+                                  rhs, conseq.ast());
+}
 
 void solver_print_stats(ostream &os) {
   float total = num_queries / 100.0;

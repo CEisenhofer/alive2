@@ -20,6 +20,8 @@ typedef struct _Z3_sort* Z3_sort;
 
 namespace smt {
 
+class PropagatorBase;
+
 class expr {
   uintptr_t ptr;
 
@@ -103,6 +105,8 @@ public:
   static expr IntSMin(unsigned bits);
   static expr IntSMax(unsigned bits);
   static expr IntUMax(unsigned bits);
+
+  std::string toString() const;
 
   // structural equivalence
   bool eq(const expr &rhs) const;
@@ -361,6 +365,7 @@ public:
 
   friend class Solver;
   friend class Model;
+  friend class PropagatorBase;
 };
 
 
