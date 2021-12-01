@@ -1471,6 +1471,10 @@ ostream& operator<<(ostream &os, const Transform &t) {
   return os;
 }
 
+#ifdef _DEBUG
+#include <z3.h>
+#endif
+
 MemoryAxiomPropagator::MemoryAxiomPropagator(const Memory &src_memory,
                                              const Memory &tgt_memory)
         : smt::Solver(true), smt::PropagatorBase(this), src_memory(src_memory),
@@ -1479,6 +1483,12 @@ MemoryAxiomPropagator::MemoryAxiomPropagator(const Memory &src_memory,
   register_final();
 
   registerBlocks();
+#ifdef _DEBUG
+  Z3_enable_trace("user_propagate");
+  Z3_enable_trace("conflict");
+  Z3_enable_trace("mk_clause");
+  Z3_global_param_set("verbose", "10");
+#endif
 }
 
 #define EXTRACT_BITS_MASK(to, from) (((to) >= 63ULL ? ULLONG_MAX : ((1ULL << (((to) - (from)) + 1)) - 1ULL)) << (from))
@@ -1581,14 +1591,14 @@ void MemoryAxiomPropagator::fixed(unsigned int i, const expr &expr) {
     assert(0);
   }
 
-  model[blockInfo] = value;
-  fixedValues.push_back(blockInfo);
-
   // Ordinary addresses may not be zero
   if (blockInfo.field == BlockFieldInfo::BlockFieldInfoEnum::BlockAddress && value == 0) {
     this->conflict(1, &i);
     return;
   }
+
+  model[blockInfo] = value;
+  fixedValues.push_back(blockInfo);
 
   Interval<uint64_t, unsigned> interval;
   uint64_t addr, size;
@@ -1625,20 +1635,56 @@ void MemoryAxiomPropagator::fixed(unsigned int i, const expr &expr) {
       // Check for block collisions
       if (blockIntervals.addOrIntersect(add, &collision)) {
         BlockData d2 = bidToExprMapping[collision.tag];
-        this->propagate(0, nullptr, IR::disjointBlocks(
+        smt::expr disjoint = IR::disjointBlocks(
                 d1.addr, d1.size.zextOrTrunc(bits_ptr_address),
-                d1.align, d2.addr, d2.size.zextOrTrunc(bits_ptr_address), d2.align));
+                d1.align, d2.addr, d2.size.zextOrTrunc(bits_ptr_address), d2.align);
+        this->propagate(0, nullptr, disjoint);
+        /*std::vector<unsigned> conflicting;
+        BlockFieldInfo addr1(BlockFieldInfo::BlockAddress, blockInfo.bid);
+        BlockFieldInfo addr2(BlockFieldInfo::BlockAddress, collision.tag);
+        BlockFieldInfo size1(BlockFieldInfo::BlockSize, blockInfo.bid);
+        BlockFieldInfo size2(BlockFieldInfo::BlockSize, collision.tag);
+        auto addr1Id = fieldToIdMapping.find(addr1);
+        auto addr2Id = fieldToIdMapping.find(addr2);
+        auto size1Id = fieldToIdMapping.find(size1);
+        auto size2Id = fieldToIdMapping.find(size2);
+        if (addr1Id != fieldToIdMapping.end()) {
+          conflicting.push_back(addr1Id->second);
+        }
+        if (addr2Id != fieldToIdMapping.end()) {
+          conflicting.push_back(addr2Id->second);
+        }
+        if (size1Id != fieldToIdMapping.end()) {
+          conflicting.push_back(size1Id->second);
+        }
+        if (size2Id != fieldToIdMapping.end()) {
+          conflicting.push_back(size2Id->second);
+        }
+        this->conflict(conflicting.size(), conflicting.data());*/
       } else {
         intervalValues.push_back(add);
         interval = add;
       }
     } else {
+      auto truncatedSize = d1.size.zextOrTrunc(bits_ptr_address);
       this->propagate(0, nullptr,
                       Pointer::hasLocalBit()
                       // don't spill to local addr section
-                      ? (d1.addr + d1.size).extract(bits_ptr_address - 1, bits_ptr_address - 1) == 0
-                      : d1.addr.add_no_uoverflow(d1.size)
+                      ? (d1.addr + truncatedSize).extract(bits_ptr_address - 1, bits_ptr_address - 1) == 0
+                      : d1.addr.add_no_uoverflow(truncatedSize.zextOrTrunc(bits_ptr_address))
       );
+      /*std::vector<unsigned> conflicting;
+      BlockFieldInfo addr(BlockFieldInfo::BlockAddress, blockInfo.bid);
+      BlockFieldInfo size(BlockFieldInfo::BlockSize, blockInfo.bid);
+      auto addrId = fieldToIdMapping.find(addr);
+      auto sizeId = fieldToIdMapping.find(size);
+      if (addrId != fieldToIdMapping.end()) {
+        conflicting.push_back(addrId->second);
+      }
+      if (sizeId != fieldToIdMapping.end()) {
+        conflicting.push_back(sizeId->second);
+      }
+      this->conflict(conflicting.size(), conflicting.data());*/
     }
   }
 

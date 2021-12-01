@@ -51,8 +51,10 @@ void context::destroy() {
   Z3_del_context(ctx);
 }
 
+smt::Z3_error context::getErrorCode() {
+  return (Z3_error)Z3_get_error_code(ctx);
 }
-
+}
 
 // close log file on program exit
 namespace {
