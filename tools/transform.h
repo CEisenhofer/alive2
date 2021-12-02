@@ -7,7 +7,6 @@
 #include "ir/state.h"
 #include "smt/solver.h"
 #include "util/errors.h"
-#include "util/interval_tree.h"
 #include <memory>
 #include <ostream>
 #include <unordered_map>
@@ -76,6 +75,46 @@ void print_model_val(std::ostream &os, const IR::State &st, const smt::Model &m,
                      const IR::Value *var, const IR::Type &type,
                      const IR::StateValue &val, unsigned child = 0);
 
+struct Interval {
+  // [start; end)
+  // start and end are constants
+
+  smt::expr start;
+  smt::expr end;
+  unsigned bid;
+
+  Interval();
+
+  Interval(const Interval &o) = default;
+
+  Interval(const smt::expr &start, const smt::expr &end);
+
+  bool intersect(const Interval &o) const;
+
+  bool isPositive() const;
+
+  bool isNegative() const;
+
+  std::string toString() {
+    return "[" + start.toString() + ", " + end.toString() + ")";
+  }
+
+};
+
+bool operator<(const Interval &o1, const Interval &o2);
+
+bool operator==(const Interval &o1, const Interval &o2);
+
+// Tests interval intersections in log(n) time
+class IntervalTree : public std::set<Interval> {
+
+public:
+
+  // returns true if there is an intersection (interval not added and collision set to corresponding interval)
+  // or return false if there was no intersection (interval added if positive)
+  bool addOrIntersect(const Interval &interval, Interval *collision);
+};
+
 struct BlockFieldInfo {
 
   enum BlockFieldInfoEnum : unsigned char {
@@ -107,7 +146,7 @@ struct BlockData {
 
   unsigned bid;
   smt::expr addr;
-  smt::expr size;
+  smt::expr size; // Not extended/truncated. The unaltered constant
   smt::expr align;
 
   BlockData() : bid(UINT32_MAX) {}
@@ -134,18 +173,17 @@ class MemoryAxiomPropagator : public smt::Solver, smt::PropagatorBase {
   std::unordered_map<unsigned, BlockData> bidToExprMapping; // Maps bid to the z3 expressions
 
   // TODO: Make it work for more than 64 bit (arbitrary integers: performance problem)
-  std::unordered_map<BlockFieldInfo, uint64_t>
-          model; // Maps bid field information -> value of that field
+  std::unordered_map<BlockFieldInfo, smt::expr> model; // Maps bid field info -> value of that field
 
   std::vector<BlockFieldInfo> fixedValues; // The fixed values in the order they were assigned
-  std::vector<util::Interval<uint64_t, unsigned>> intervalValues; // The complete memory-blocks in the order they were completed
+  std::vector<Interval> intervalValues; // The complete memory-blocks in the order they were completed
 
   std::stack<unsigned> fixedCnt; // Number of fixed values per decision level
   std::stack<unsigned> intervalCnt; // Number of complete memory-blocks per decision level
 
   // The addresses + sizes in the memory (used for block disjointness)
   // Tag: bid (unsigned)
-  util::IntervalTree<uint64_t, unsigned> blockIntervals;
+  IntervalTree blockIntervals;
 
   void registerBlocks();
 
@@ -159,9 +197,7 @@ public:
 
   void pop(unsigned num_scopes) override;
 
-  PropagatorBase *fresh(Z3_context ctx) override {
-    return this;
-  }
+  PropagatorBase *fresh(Z3_context ctx) override;
 
   void fixed(unsigned int i, const smt::expr &expr) override;
 

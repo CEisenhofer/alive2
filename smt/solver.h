@@ -91,14 +91,21 @@ private:
   friend class Solver;
 };
 
+enum SolverType {
+  Simple,
+  Tactics,
+  SimpleWithPreprocessing
+};
 
 class Solver {
   Z3_solver s;
+  SolverType type;
   bool valid = true;
   bool is_unsat = false;
 
 public:
-  Solver(bool simple = false);
+  Solver(SolverType type = SolverType::Tactics);
+
   ~Solver();
 
   void add(const expr &e);

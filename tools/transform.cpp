@@ -1181,7 +1181,7 @@ Errors TransformVerify::verify() const {
 }
 
 
-TypingAssignments::TypingAssignments(const expr &e) : s(true), sneg(true) {
+TypingAssignments::TypingAssignments(const expr &e) : s(SolverType::Simple), sneg(SolverType::Simple) {
   if (e.isTrue()) {
     has_only_one_solution = true;
   } else {
@@ -1471,22 +1471,104 @@ ostream& operator<<(ostream &os, const Transform &t) {
   return os;
 }
 
-#ifdef _DEBUG
+Interval::Interval()
+        : start(smt::expr::mkUInt(0, bits_ptr_address)), end(smt::expr::mkUInt(0, bits_ptr_address)) {}
+
+Interval::Interval(const smt::expr &start, const smt::expr &end) : start(start), end(end) {}
+
+bool Interval::intersect(const Interval &o) const {
+  smt::expr expr = start.uge(o.end) || o.start.uge(end);
+  assert(expr.isBool());
+  return expr.isFalse();
+}
+
+bool Interval::isPositive() const {
+  smt::expr expr = start.ult(end);
+  assert(expr.isBool());
+  return expr.isTrue();
+}
+
+bool Interval::isNegative() const {
+  smt::expr expr = end.ult(start);
+  assert(expr.isBool());
+  return expr.isTrue();
+}
+
+bool operator<(const Interval &o1, const Interval &o2) {
+  assert(o1.start.ult(o2.start).isBool());
+  if (o1.start.ult(o2.start).isTrue()) {
+    return true;
+  }
+  assert((o1.start == o2.start).isBool());
+  if ((o1.start == o2.start).isFalse()) {
+    return false;
+  }
+  assert(o1.end.ugt(o2.end).isBool());
+  if (o1.end.ugt(o2.end).isTrue()) {
+    return true;
+  }
+  assert((o1.end == o2.end).isBool());
+  if ((o1.end == o2.end).isFalse()) {
+    return false;
+  }
+  return o1.bid < o2.bid;
+}
+
+bool operator==(const Interval &o1, const Interval &o2) {
+  return (o1.start == o2.start).isTrue() && (o1.end == o2.end).isTrue() && o1.bid == o2.bid;
+}
+
+bool IntervalTree::addOrIntersect(const Interval &interval, Interval *collision) {
+  if (interval.isNegative()) {
+    return false;
+  }
+  if (this->empty()) {
+    this->insert(interval);
+    return false;
+  }
+
+  auto bound = this->upper_bound(interval);
+  if (bound != this->end() && bound->intersect(interval)) {
+    if (collision != nullptr) {
+      *collision = *bound;
+    }
+    return true;
+  }
+  // consider the interval directly below. Skip all 0-intervals that might come before the relevant one
+  while (bound != this->begin()) {
+    bound--;
+    if (bound->intersect(interval)) {
+      if (collision != nullptr) {
+        *collision = *bound;
+      }
+      return true;
+    }
+    if ((bound->start != bound->end).isTrue()) {
+      break;
+    }
+  }
+  this->insert(bound, interval);
+  return false;
+}
+
+#ifdef DEBUG
 #include <z3.h>
 #endif
 
 MemoryAxiomPropagator::MemoryAxiomPropagator(const Memory &src_memory,
                                              const Memory &tgt_memory)
-        : smt::Solver(true), smt::PropagatorBase(this), src_memory(src_memory),
+        : smt::Solver(SolverType::Simple), smt::PropagatorBase(this), src_memory(src_memory),
           tgt_memory(tgt_memory) {
   register_fixed();
   register_final();
 
   registerBlocks();
-#ifdef _DEBUG
+#ifdef DEBUG
   Z3_enable_trace("user_propagate");
   Z3_enable_trace("conflict");
   Z3_enable_trace("mk_clause");
+  Z3_enable_trace("internalize_bug");
+  Z3_enable_trace("resolve_conflict_bug");
   Z3_global_param_set("verbose", "10");
 #endif
 }
@@ -1519,34 +1601,32 @@ void MemoryAxiomPropagator::registerBlocks() {
     unsigned id;
     BlockFieldInfo addrInfo(BlockFieldInfo::BlockFieldInfoEnum::BlockAddress, bid);
     BlockFieldInfo sizeInfo(BlockFieldInfo::BlockFieldInfoEnum::BlockSize, bid);
-    uint64_t addrValue, sizeValue;
 
     bool bothConst = true;
 
-    if (!addr.isUInt(addrValue)) {
+    if (!addr.isConst()) {
       id = register_expr(addr);
       idToFieldMapping[id] = addrInfo;
       fieldToIdMapping[addrInfo] = id;
       bothConst = false;
     } else {
-      model[addrInfo] = addrValue;
+      model[addrInfo] = addr;
       fixedValues.push_back(addrInfo);
     }
-    if (!size.isUInt(sizeValue)) {
+    if (!size.isConst()) {
       id = register_expr(size);
       idToFieldMapping[id] = sizeInfo;
       fieldToIdMapping[sizeInfo] = id;
       bothConst = false;
     } else {
-      model[sizeInfo] = sizeValue;
+      model[sizeInfo] = size.zextOrTrunc(bits_ptr_address);
       fixedValues.push_back(sizeInfo);
     }
 
     if (bothConst) {
-      util::Interval<uint64_t, unsigned> interval(addrValue,
-                                                  addrValue + EXTRACT_FIRST_BITS(sizeValue, bits_ptr_address));
+      Interval interval(addr, addr + size.zextOrTrunc(bits_ptr_address));
       if (interval.isPositive()) {
-        interval.tag = bid;
+        interval.bid = bid;
         bool intersects = blockIntervals.addOrIntersect(interval, nullptr);
         assert(!intersects);
         intervalValues.push_back(interval);
@@ -1586,22 +1666,21 @@ void MemoryAxiomPropagator::pop(unsigned int num_scopes) {
 
 void MemoryAxiomPropagator::fixed(unsigned int i, const expr &expr) {
   BlockFieldInfo blockInfo = idToFieldMapping.at(i);
-  uint64_t value;
-  if (!expr.isUInt(value)) {
-    assert(0);
-  }
 
   // Ordinary addresses may not be zero
-  if (blockInfo.field == BlockFieldInfo::BlockFieldInfoEnum::BlockAddress && value == 0) {
+  if (blockInfo.field == BlockFieldInfo::BlockFieldInfoEnum::BlockAddress && expr.isZero()) {
     this->conflict(1, &i);
     return;
   }
 
+  smt::expr value = blockInfo.field == BlockFieldInfo::BlockSize
+                    ? expr.zextOrTrunc(bits_ptr_address)
+                    : expr;
+
   model[blockInfo] = value;
   fixedValues.push_back(blockInfo);
 
-  Interval<uint64_t, unsigned> interval;
-  uint64_t addr, size;
+  smt::expr addr, size;
   bool foundInterval = false;
 
   // Add interval and check if addresses are disjoint
@@ -1627,14 +1706,16 @@ void MemoryAxiomPropagator::fixed(unsigned int i, const expr &expr) {
 
   if (foundInterval) {
     BlockData d1 = bidToExprMapping[blockInfo.bid];
-    util::Interval<uint64_t, unsigned> add(addr, addr + EXTRACT_FIRST_BITS(size, bits_ptr_address));
-    if ((!Pointer::hasLocalBit() || EXTRACT_BITS(interval.end, bits_ptr_address - 1, bits_ptr_address - 1) != 0) &&
-        !add.isNegative()) {
-      add.tag = blockInfo.bid;
-      util::Interval<uint64_t, unsigned> collision;
+    Interval add(addr, addr + size);
+    if (Pointer::hasLocalBit()
+      ? (add.end.extract(bits_ptr_address - 1, bits_ptr_address - 1) == 0).isTrue()
+      : addr.add_no_uoverflow(size).isTrue()) {
+
+      add.bid = blockInfo.bid;
+      Interval collision;
       // Check for block collisions
       if (blockIntervals.addOrIntersect(add, &collision)) {
-        BlockData d2 = bidToExprMapping[collision.tag];
+        BlockData d2 = bidToExprMapping[collision.bid];
         smt::expr disjoint = IR::disjointBlocks(
                 d1.addr, d1.size.zextOrTrunc(bits_ptr_address),
                 d1.align, d2.addr, d2.size.zextOrTrunc(bits_ptr_address), d2.align);
@@ -1663,7 +1744,6 @@ void MemoryAxiomPropagator::fixed(unsigned int i, const expr &expr) {
         this->conflict(conflicting.size(), conflicting.data());*/
       } else {
         intervalValues.push_back(add);
-        interval = add;
       }
     } else {
       auto truncatedSize = d1.size.zextOrTrunc(bits_ptr_address);
@@ -1693,4 +1773,7 @@ void MemoryAxiomPropagator::fixed(unsigned int i, const expr &expr) {
 void MemoryAxiomPropagator::final() {
 }
 
+PropagatorBase *MemoryAxiomPropagator::fresh(Z3_context ctx) {
+  return this;
+}
 }

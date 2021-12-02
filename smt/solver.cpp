@@ -221,9 +221,10 @@ void solver_tactic_verbose(bool yes) {
   tactic_verbose = yes;
 }
 
-Solver::Solver(bool simple) {
-  s = simple ? Z3_mk_simple_solver(ctx())
-             : Z3_mk_solver_from_tactic(ctx(), tactic->t);
+Solver::Solver(SolverType type) : type(type) {
+  s = type == SolverType::Tactics
+      ? Z3_mk_solver_from_tactic(ctx(), tactic->t)
+      : Z3_mk_simple_solver(ctx());
   Z3_solver_inc_ref(ctx(), s);
 }
 
