@@ -1558,7 +1558,7 @@ bool IntervalTree::addOrIntersect(const Interval &interval, Interval *collision)
 
 MemoryAxiomPropagator::MemoryAxiomPropagator(const Memory &src_memory,
                                              const Memory &tgt_memory)
-        : smt::Solver(SolverType::Simple), smt::PropagatorBase(this), src_memory(src_memory),
+        : smt::Solver(SolverType::Tactics), smt::PropagatorBase(this), src_memory(src_memory),
           tgt_memory(tgt_memory) {
   register_fixed();
   register_final();
