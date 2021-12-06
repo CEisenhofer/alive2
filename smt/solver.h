@@ -79,6 +79,8 @@ public:
     return m;
   }
 
+  void printModel();
+
 private:
   Model m;
   answer a;

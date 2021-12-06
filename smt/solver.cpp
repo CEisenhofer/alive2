@@ -211,6 +211,10 @@ ostream& operator<<(ostream &os, const Model &m) {
   return os << Z3_model_to_string(ctx(), m.m);
 }
 
+void Result::printModel() {
+  printf("Native z3-model: %s\n", Z3_model_to_string(ctx(), m.m));
+  fflush(stdout);
+}
 
 static bool print_queries = false;
 void solver_print_queries(bool yes) {

@@ -208,7 +208,11 @@ public:
                                 const smt::expr &e) {
     MemoryAxiomPropagator s(src_memory, tgt_memory);
     s.add(e);
-    return s.check();
+    smt::Result result = s.check();
+    if (result.isSat()) {
+      result.printModel();
+    }
+    return result;
   }
 };
 
