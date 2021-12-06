@@ -1581,6 +1581,9 @@ MemoryAxiomPropagator::MemoryAxiomPropagator(const Memory &src_memory,
 
 void MemoryAxiomPropagator::registerBlocks() {
 
+  printf("\nRegistering ids!\n\n");
+  fflush(stdout);
+
   if (num_locals_src == 0 && num_locals_tgt == 0 && num_nonlocals == 0)
     return;
 
@@ -1613,6 +1616,11 @@ void MemoryAxiomPropagator::registerBlocks() {
     } else {
       model[addrInfo] = addr;
       fixedValues.push_back(addrInfo);
+      uint64_t s;
+      addr.isUInt(s);
+      printf("Fixed address a-priori: %llu\n", (long long unsigned int)s);
+      fflush(stdout);
+
     }
     if (!size.isConst()) {
       id = register_expr(size);
@@ -1622,6 +1630,10 @@ void MemoryAxiomPropagator::registerBlocks() {
     } else {
       model[sizeInfo] = size.zextOrTrunc(bits_ptr_address);
       fixedValues.push_back(sizeInfo);
+      uint64_t s;
+      size.zextOrTrunc(bits_ptr_address).isUInt(s);
+      printf("Fixed size a-priori: %llu with bid: %i\n", (long long unsigned int)s, bid);
+      fflush(stdout);
     }
 
     if (bothConst) {
@@ -1631,6 +1643,8 @@ void MemoryAxiomPropagator::registerBlocks() {
         bool intersects = blockIntervals.addOrIntersect(interval, nullptr);
         assert(!intersects);
         intervalValues.push_back(interval);
+        printf("Added interval a-priori: %s\n", interval.toString().c_str());
+        fflush(stdout);
       }
     }
 
@@ -1651,18 +1665,29 @@ void MemoryAxiomPropagator::pop(unsigned int num_scopes) {
     fixedCnt.pop();
     intervalCnt.pop();
     for (auto j = fixedValues.size(); j > previousFixedCnt; j--) {
-      size_t sz = model.size();
-      size_t removed = model.erase(fixedValues[j - 1]);
-      assert(sz == model.size() + 1 && removed == 1);
+      // size_t sz = model.size();
+      /* size_t removed = */model.erase(fixedValues[j - 1]);
+      // assert(sz == model.size() + 1 && removed == 1);
     }
     for (auto j = intervalValues.size(); j > previousIntervalCnt; j--) {
-      size_t sz = blockIntervals.size();
-      size_t removed = blockIntervals.erase(intervalValues[j - 1]);
-      assert(sz == blockIntervals.size() + 1 && removed == 1);
+      // size_t sz = blockIntervals.size();
+      /* size_t removed =*/ blockIntervals.erase(intervalValues[j - 1]);
+      printf("Removed interval: %s\n\n", intervalValues[j - 1].toString().c_str());
+      // bool b1 = sz == blockIntervals.size() + 1;
+      // bool b2 = removed == 1;
+      // if (!(b1 && b2)) {
+      //   printf(" ");
+      // }
+      // assert(sz == blockIntervals.size() + 1 && removed == 1);
     }
+    // int prevValue = intervalValues.size();
     fixedValues.resize(previousFixedCnt);
     intervalValues.resize(previousIntervalCnt);
+    // if (intervalValues.size() != blockIntervals.size()) {
+    //   printf("%i", prevValue);
+    // }
   }
+  fflush(stdout);
 }
 
 void MemoryAxiomPropagator::fixed(unsigned int i, const expr &expr) {
@@ -1673,6 +1698,11 @@ void MemoryAxiomPropagator::fixed(unsigned int i, const expr &expr) {
     this->conflict(1, &i);
     return;
   }
+
+  uint64_t s;
+  expr.isUInt(s);
+  printf("Fixed %s: %llu with bid: %i\n", blockInfo.field == BlockFieldInfo::BlockSize ? "size" : "address", (long long unsigned int)s, blockInfo.bid);
+  fflush(stdout);
 
   smt::expr value = blockInfo.field == BlockFieldInfo::BlockSize
                     ? expr.zextOrTrunc(bits_ptr_address)
@@ -1709,8 +1739,8 @@ void MemoryAxiomPropagator::fixed(unsigned int i, const expr &expr) {
     BlockData d1 = bidToExprMapping[blockInfo.bid];
     Interval add(addr, addr + size);
     if (Pointer::hasLocalBit()
-      ? (add.end.extract(bits_ptr_address - 1, bits_ptr_address - 1) == 0).isTrue()
-      : addr.add_no_uoverflow(size).isTrue()) {
+        ? (add.end.extract(bits_ptr_address - 1, bits_ptr_address - 1) == 0).isTrue()
+        : addr.add_no_uoverflow(size).isTrue()) {
 
       add.bid = blockInfo.bid;
       Interval collision;
@@ -1720,6 +1750,8 @@ void MemoryAxiomPropagator::fixed(unsigned int i, const expr &expr) {
         smt::expr disjoint = IR::disjointBlocks(
                 d1.addr, d1.size.zextOrTrunc(bits_ptr_address),
                 d1.align, d2.addr, d2.size.zextOrTrunc(bits_ptr_address), d2.align);
+        printf("Interval intersection: %s vs %s\n\n", add.toString().c_str(), collision.toString().c_str());
+        fflush(stdout);
         this->propagate(0, nullptr, disjoint);
         /*std::vector<unsigned> conflicting;
         BlockFieldInfo addr1(BlockFieldInfo::BlockAddress, blockInfo.bid);
@@ -1744,10 +1776,14 @@ void MemoryAxiomPropagator::fixed(unsigned int i, const expr &expr) {
         }
         this->conflict(conflicting.size(), conflicting.data());*/
       } else {
+        printf("Added interval: %s\n\n", add.toString().c_str());
+        fflush(stdout);
         intervalValues.push_back(add);
       }
     } else {
       auto truncatedSize = d1.size.zextOrTrunc(bits_ptr_address);
+      printf("Overflow: %s\n\n", add.toString().c_str());
+      fflush(stdout);
       this->propagate(0, nullptr,
                       Pointer::hasLocalBit()
                       // don't spill to local addr section
