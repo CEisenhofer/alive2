@@ -75,19 +75,76 @@ void print_model_val(std::ostream &os, const IR::State &st, const smt::Model &m,
                      const IR::Value *var, const IR::Type &type,
                      const IR::StateValue &val, unsigned child = 0);
 
+// We could use also use arithmetic over z3 constants but this is slow
+class BigNum {
+  /**
+   * Binary string
+   * Contains exactly bitWidth 0/1.
+   * If set to nullptr the value of u64 is taken
+   */
+  char *arr;
+  /**
+   * The number of bits
+   */
+  size_t bitWidth;
+  /**
+   * If number is short enough
+   */
+  uint64_t u64;
+
+public:
+
+  BigNum() : arr(nullptr), bitWidth(0), u64(0) {}
+
+  BigNum(size_t bitWidth) : arr(nullptr), bitWidth(bitWidth), u64(0) {}
+
+  BigNum(uint64_t u64, size_t bitWidth);
+
+  BigNum(const char *arr, size_t bitWidth);
+
+  BigNum(const BigNum &other) = default;
+
+  ~BigNum();
+
+  static BigNum truncOrExtend(uint64_t u64, size_t toBitWidth);
+
+  static BigNum truncOrExtend(const char *arr, size_t toBitWidth);
+
+  BigNum operator+(const BigNum &other) const;
+
+  bool operator==(const BigNum &other) const;
+
+  bool operator!=(const BigNum &other) const { return !(*this == other); }
+
+  bool operator<(const BigNum &other) const;
+
+  bool operator<=(const BigNum &other) const;
+
+  bool operator>(const BigNum &other) const { return other < *this; }
+
+  bool operator>=(const BigNum &other) const { return other <= *this; }
+
+  char extract(size_t pos);
+
+  std::string toString() {
+    return (arr == nullptr ? std::to_string(u64) : std::string(arr)) + " (" + std::to_string(bitWidth) + "bits)";
+  }
+
+};
+
 struct Interval {
   // [start; end)
   // start and end are constants
 
-  smt::expr start;
-  smt::expr end;
+  BigNum start;
+  BigNum end;
   unsigned bid;
 
   Interval();
 
   Interval(const Interval &o) = default;
 
-  Interval(const smt::expr &start, const smt::expr &end);
+  Interval(const BigNum &start, const BigNum &end);
 
   bool intersect(const Interval &o) const;
 
@@ -173,7 +230,7 @@ class MemoryAxiomPropagator : public smt::Solver, smt::PropagatorBase {
   std::unordered_map<unsigned, BlockData> bidToExprMapping; // Maps bid to the z3 expressions
 
   // TODO: Make it work for more than 64 bit (arbitrary integers: performance problem)
-  std::unordered_map<BlockFieldInfo, smt::expr> model; // Maps bid field info -> value of that field
+  std::unordered_map<BlockFieldInfo, BigNum> model; // Maps bid field info -> value of that field
 
   std::vector<BlockFieldInfo> fixedValues; // The fixed values in the order they were assigned
   std::vector<Interval> intervalValues; // The complete memory-blocks in the order they were completed
@@ -191,7 +248,7 @@ public:
   MemoryAxiomPropagator(const IR::Memory &src_memory,
                         const IR::Memory &tgt_memory);
 
-  ~MemoryAxiomPropagator() override = default;
+  ~MemoryAxiomPropagator() override;
 
   void push() override;
 
@@ -209,9 +266,11 @@ public:
     MemoryAxiomPropagator s(src_memory, tgt_memory);
     s.add(e);
     smt::Result result = s.check();
+#ifdef NDEBUG
     if (result.isSat()) {
       result.printModel();
     }
+#endif
     return result;
   }
 };

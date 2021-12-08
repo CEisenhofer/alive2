@@ -447,6 +447,11 @@ bool expr::isInt(int64_t &n) const {
   return true;
 }
 
+const char* expr::getBinaryString() const {
+  C();
+  return Z3_get_numeral_binary_string(ctx(), ast());
+}
+
 bool expr::isEq(expr &lhs, expr &rhs) const {
   return isBinOp(lhs, rhs, Z3_OP_EQ);
 }

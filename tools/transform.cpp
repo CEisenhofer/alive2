@@ -21,10 +21,13 @@
 #include <set>
 #include <sstream>
 #include <unordered_map>
+#include <cstring>
 
-typedef const char *Z3_string;
+#ifdef NDEBUG
 
-Z3_string Z3_ast_to_string(Z3_context c, Z3_ast a);
+#include <z3.h>
+
+#endif
 
 using namespace IR;
 using namespace smt;
@@ -538,6 +541,12 @@ static void check_refinement(Errors &errs, const Transform &t,
   // 4. Check undef
   CHECK(dom && encode_undef_refinement(type, ap, bp),
         print_value, "Target's return value is more undefined");
+
+#ifdef NDEBUG
+    // Z3_enable_trace("asserted_formulas");
+    // Z3_enable_trace("model");
+    // Z3_global_param_set("verbose", "10");
+#endif
 
   // 5. Check value
   CHECK(dom && !value_cnstr, print_value, "Value mismatch");
@@ -1472,51 +1481,282 @@ ostream& operator<<(ostream &os, const Transform &t) {
   return os;
 }
 
-Interval::Interval()
-        : start(smt::expr::mkUInt(0, bits_ptr_address)), end(smt::expr::mkUInt(0, bits_ptr_address)) {}
+#ifdef _DEBUG
+#define printf(...)
+#define fflush(X)
+#endif
 
-Interval::Interval(const smt::expr &start, const smt::expr &end) : start(start), end(end) {}
+static void uint64ToBinaryString(uint64_t n, char *arr) {
+  // arr contains at least 65 elements
+  arr[64] = '\0';
+  for (int i = 64; i > 0; i--) {
+    char item = (char)(n & 1);
+    n >>= 1;
+    arr[i - 1] = '0' + item;
+  }
+}
+
+BigNum::BigNum(uint64_t u64, size_t bitWidth) : arr(nullptr), bitWidth(bitWidth), u64(u64) {}
+
+BigNum::BigNum(const char *arr, size_t bitWidth) {
+  assert(strlen(arr) == bitWidth); // leading zeros important for comparing binary numbers
+  u64 = 0;
+  this->bitWidth = bitWidth;
+  if (bitWidth > 64) {
+    this->arr = strdup(arr);
+  } else {
+    // Simplify
+    for (size_t i = 0; i < bitWidth && arr[i] != '\0'; i++) {
+      u64 <<= 1;
+      u64 |= arr[i] - '0';
+    }
+  }
+}
+
+BigNum::~BigNum() {
+  if (arr) {
+    free(arr);
+  }
+}
+
+BigNum BigNum::truncOrExtend(uint64_t u64, size_t toBitWidth) {
+  if (toBitWidth == 64) {
+    return BigNum(u64, toBitWidth);
+  }
+  if (toBitWidth < 64) {
+    return BigNum(u64 & ((1ull << toBitWidth) - 1), toBitWidth);
+  }
+  char *arr = (char *)malloc(sizeof(char) * (toBitWidth + 1));
+  memset(arr, '0', toBitWidth - 64);
+  uint64ToBinaryString(u64, arr + toBitWidth - 64);
+  BigNum res(arr, toBitWidth);
+  free(arr);
+  return res;
+}
+
+BigNum BigNum::truncOrExtend(const char *arr, size_t toBitWidth) {
+  size_t len = strlen(arr);
+  if (len == toBitWidth) {
+    return BigNum(arr, toBitWidth);
+  }
+  char *a = (char *)malloc(sizeof(char) * (toBitWidth + 1));
+  if (len < toBitWidth) {
+    memset(a, '0', toBitWidth - len);
+    memcpy(a + toBitWidth - len, arr, len + 1);
+  } else {
+    memcpy(a, arr + (len - toBitWidth), toBitWidth + 1);
+  }
+  BigNum res(a, toBitWidth);
+  free(a);
+  return res;
+}
+
+BigNum BigNum::operator+(const BigNum &other) const {
+  assert(bitWidth == other.bitWidth);
+  // Simple case
+  if (!arr && !other.arr) {
+    uint64_t res = u64 + other.u64;
+    if (bitWidth == 64) {
+      return BigNum(res, bitWidth);
+    }
+    if (bitWidth < 64) {
+      return BigNum(res & ((1ull << bitWidth) - 1ull), bitWidth);
+    }
+    if (res >= u64 && res >= other.u64) {
+      // No overflow
+      return BigNum(res, bitWidth);
+    }
+    // Overflow
+    char arr[66];
+    arr[0] = '1';
+    uint64ToBinaryString(res, arr + 1);
+    return BigNum(arr, bitWidth);
+  }
+
+  // Array case
+  char help[65]; // In case one of the elements is saved as a plain uint64
+  char overflow = 0;
+  size_t i1 = 0, i2 = 0, i = 0;
+  char *a1, *a2;
+  if (arr == nullptr) {
+    a1 = help;
+    uint64ToBinaryString(u64, help);
+  } else {
+    a1 = arr;
+  }
+  if (other.arr == nullptr) {
+    a2 = help;
+    uint64ToBinaryString(other.u64, help);
+  } else {
+    a2 = other.arr;
+  }
+
+  char *res = (char *)malloc(sizeof(char) * (bitWidth + 1));
+
+  while (a1[i1] != '\0' && a2[i2] != '\0' && i < bitWidth) {
+    char c1 = 0, c2 = 0;
+    if (a1[i1] != '\0') {
+      i = i1;
+      c1 = a1[i1++];
+    }
+    if (a2[i2] != '\0') {
+      i = i2;
+      c2 = a2[i2++];
+    }
+    char v = c1 + c2 + overflow;
+    res[i++] = '0' + (v & 1);
+    overflow = v >> 1;
+  }
+  res[bitWidth] = '\0';
+  return BigNum(res, bitWidth);
+}
+
+bool BigNum::operator==(const BigNum &other) const {
+  assert(bitWidth == other.bitWidth);
+  if (arr == nullptr && other.arr == nullptr) {
+    return u64 == other.u64;
+  }
+  if (arr != nullptr && other.arr != nullptr) {
+    return strcmp(arr, other.arr) == 0;
+  }
+  uint64_t n;
+  char *a;
+  if (arr != nullptr) {
+    a = arr;
+    n = other.u64;
+  } else {
+    a = other.arr;
+    n = u64;
+  }
+  for (int i = bitWidth; i > 0; i--) {
+    char item = (char)(n & 1);
+    n >>= 1;
+    if (a[i - 1] != item) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool BigNum::operator<(const BigNum &other) const {
+  assert(bitWidth == other.bitWidth);
+  if (arr == nullptr && other.arr == nullptr) {
+    return u64 < other.u64;
+  }
+  if (arr != nullptr && other.arr != nullptr) {
+    return strcmp(arr, other.arr) < 0;
+  }
+  uint64_t n;
+  char *a;
+  bool invert = false;
+  if (arr != nullptr) {
+    a = arr;
+    n = other.u64;
+  } else {
+    a = other.arr;
+    n = u64;
+    invert = true;
+  }
+  for (int i = bitWidth - 1; i >= 64; i--) {
+    if (a[i] == '1') {
+      return invert; // a > n
+    }
+  }
+  for (int i = bitWidth; i > 0; i--) {
+    char item = (n & (1ull << (i - 1))) >> (i - 1);
+    if (a[i - 1] > item)
+      return invert;
+    else if (a[i - 1] < item)
+      return !invert;
+  }
+  return false;
+}
+
+bool BigNum::operator<=(const BigNum &other) const {
+  assert(bitWidth == other.bitWidth);
+  if (arr == nullptr && other.arr == nullptr) {
+    return u64 <= other.u64;
+  }
+  if (arr != nullptr && other.arr != nullptr) {
+    return strcmp(arr, other.arr) <= 0;
+  }
+  uint64_t n;
+  char *a;
+  bool invert = false;
+  if (arr != nullptr) {
+    a = arr;
+    n = other.u64;
+  } else {
+    a = other.arr;
+    n = u64;
+    invert = true;
+  }
+  for (int i = bitWidth - 1; i >= 64; i--) {
+    if (a[i] == '1') {
+      return invert; // a > n
+    }
+  }
+  for (int i = bitWidth; i > 0; i--) {
+    char item = (n & (1ull << (i - 1))) >> (i - 1);
+    if (a[i - 1] > item)
+      return invert;
+    else if (a[i - 1] < item)
+      return !invert;
+  }
+  return true;
+}
+
+char BigNum::extract(size_t pos) {
+  if (arr == nullptr) {
+    if (pos >= 64) {
+      return 0;
+    }
+    return (char)((u64 & (1ull << pos)) >> pos);
+  }
+  return arr[pos] - '0';
+}
+
+Interval::Interval()
+        : start(bits_ptr_address), end(bits_ptr_address) {}
+
+Interval::Interval(const BigNum &start, const BigNum &end) : start(start), end(end) {}
 
 bool Interval::intersect(const Interval &o) const {
-  smt::expr expr = start.uge(o.end) || o.start.uge(end);
+  smt::expr expr = start >= o.end || o.start >= end;
   assert(expr.isBool());
   return expr.isFalse();
 }
 
 bool Interval::isPositive() const {
-  smt::expr expr = start.ult(end);
+  smt::expr expr = start < end;
   assert(expr.isBool());
   return expr.isTrue();
 }
 
 bool Interval::isNegative() const {
-  smt::expr expr = end.ult(start);
+  smt::expr expr = end < start;
   assert(expr.isBool());
   return expr.isTrue();
 }
 
 bool operator<(const Interval &o1, const Interval &o2) {
-  assert(o1.start.ult(o2.start).isBool());
-  if (o1.start.ult(o2.start).isTrue()) {
+  if (o1.start < o2.start) {
     return true;
   }
-  assert((o1.start == o2.start).isBool());
-  if ((o1.start == o2.start).isFalse()) {
+  if (o1.start == o2.start) {
     return false;
   }
-  assert(o1.end.ugt(o2.end).isBool());
-  if (o1.end.ugt(o2.end).isTrue()) {
+  if (o1.end > o2.end) {
     return true;
   }
-  assert((o1.end == o2.end).isBool());
-  if ((o1.end == o2.end).isFalse()) {
+  if (o1.end == o2.end) {
     return false;
   }
   return o1.bid < o2.bid;
 }
 
 bool operator==(const Interval &o1, const Interval &o2) {
-  return (o1.start == o2.start).isTrue() && (o1.end == o2.end).isTrue() && o1.bid == o2.bid;
+  return o1.start == o2.start && o1.end == o2.end && o1.bid == o2.bid;
 }
 
 bool IntervalTree::addOrIntersect(const Interval &interval, Interval *collision) {
@@ -1544,17 +1784,13 @@ bool IntervalTree::addOrIntersect(const Interval &interval, Interval *collision)
       }
       return true;
     }
-    if ((bound->start != bound->end).isTrue()) {
+    if (bound->start != bound->end) {
       break;
     }
   }
   this->insert(bound, interval);
   return false;
 }
-
-#ifdef DEBUG
-#include <z3.h>
-#endif
 
 MemoryAxiomPropagator::MemoryAxiomPropagator(const Memory &src_memory,
                                              const Memory &tgt_memory)
@@ -1564,20 +1800,11 @@ MemoryAxiomPropagator::MemoryAxiomPropagator(const Memory &src_memory,
   register_final();
 
   registerBlocks();
-#ifdef DEBUG
-  Z3_enable_trace("user_propagate");
-  Z3_enable_trace("conflict");
-  Z3_enable_trace("mk_clause");
-  Z3_enable_trace("internalize_bug");
-  Z3_enable_trace("resolve_conflict_bug");
-  Z3_global_param_set("verbose", "10");
-#endif
 }
 
-#define EXTRACT_BITS_MASK(to, from) (((to) >= 63ULL ? ULLONG_MAX : ((1ULL << (((to) - (from)) + 1)) - 1ULL)) << (from))
-#define EXTRACT_BITS(x, to, from) (((x) & (EXTRACT_BITS_MASK(to, from))) >> (from))
-#define EXTRACT_FIRST_BITS_MASK(k) EXTRACT_BITS_MASK(((k) - 1), 0)
-#define EXTRACT_FIRST_BITS(x, k) ((x) & (EXTRACT_FIRST_BITS_MASK(k)))
+MemoryAxiomPropagator::~MemoryAxiomPropagator() {
+
+}
 
 void MemoryAxiomPropagator::registerBlocks() {
 
@@ -1601,6 +1828,7 @@ void MemoryAxiomPropagator::registerBlocks() {
     expr addr = ptr.getAddress();
     expr size = ptr.blockSize();
     expr align = ptr.blockAlignment();
+    BigNum addrValue, sizeValue;
 
     unsigned id;
     BlockFieldInfo addrInfo(BlockFieldInfo::BlockFieldInfoEnum::BlockAddress, bid);
@@ -1610,11 +1838,18 @@ void MemoryAxiomPropagator::registerBlocks() {
 
     if (!addr.isConst()) {
       id = register_expr(addr);
+      printf("Registering address-expr: %s\n", addr.toString().c_str());
+      fflush(stdout);
       idToFieldMapping[id] = addrInfo;
       fieldToIdMapping[addrInfo] = id;
       bothConst = false;
     } else {
-      model[addrInfo] = addr;
+      uint64_t u64;
+      if (addr.isUInt(u64))
+        addrValue = std::move(BigNum(u64, addr.bits()));
+      else
+        addrValue = std::move(BigNum(addr.getBinaryString(), addr.bits()));
+      model[addrInfo] = addrValue;
       fixedValues.push_back(addrInfo);
       uint64_t s;
       addr.isUInt(s);
@@ -1624,11 +1859,18 @@ void MemoryAxiomPropagator::registerBlocks() {
     }
     if (!size.isConst()) {
       id = register_expr(size);
+      printf("Registering size-expr: %s\n", addr.toString().c_str());
+      fflush(stdout);
       idToFieldMapping[id] = sizeInfo;
       fieldToIdMapping[sizeInfo] = id;
       bothConst = false;
     } else {
-      model[sizeInfo] = size.zextOrTrunc(bits_ptr_address);
+      uint64_t u64;
+      if (size.isUInt(u64))
+        sizeValue = std::move(BigNum::truncOrExtend(u64, bits_ptr_address));
+      else
+        sizeValue = std::move(BigNum::truncOrExtend(size.getBinaryString(), addr.bits()));
+      model[sizeInfo] = sizeValue;
       fixedValues.push_back(sizeInfo);
       uint64_t s;
       size.zextOrTrunc(bits_ptr_address).isUInt(s);
@@ -1637,7 +1879,7 @@ void MemoryAxiomPropagator::registerBlocks() {
     }
 
     if (bothConst) {
-      Interval interval(addr, addr + size.zextOrTrunc(bits_ptr_address));
+      Interval interval(addrValue, addrValue + sizeValue);
       if (interval.isPositive()) {
         interval.bid = bid;
         bool intersects = blockIntervals.addOrIntersect(interval, nullptr);
@@ -1701,22 +1943,33 @@ void MemoryAxiomPropagator::fixed(unsigned int i, const expr &expr) {
 
   uint64_t s;
   expr.isUInt(s);
-  printf("Fixed %s: %llu with bid: %i\n", blockInfo.field == BlockFieldInfo::BlockSize ? "size" : "address", (long long unsigned int)s, blockInfo.bid);
+  printf("Fixed %s: %llu with bid: %i\n", blockInfo.field == BlockFieldInfo::BlockSize ? "size" : "address",
+         (long long unsigned int)s, blockInfo.bid);
   fflush(stdout);
 
-  smt::expr value = blockInfo.field == BlockFieldInfo::BlockSize
-                    ? expr.zextOrTrunc(bits_ptr_address)
-                    : expr;
+  BigNum value;
+  uint64_t u64;
+  if (blockInfo.field != BlockFieldInfo::BlockSize) {
+    if (expr.isUInt(u64))
+      value = std::move(BigNum(u64, expr.bits()));
+    else
+      value = std::move(BigNum(expr.getBinaryString(), expr.bits()));
+  } else {
+    if (expr.isUInt(u64))
+      value = std::move(BigNum::truncOrExtend(u64, expr.bits()));
+    else
+      value = std::move(BigNum::truncOrExtend(expr.getBinaryString(), expr.bits()));
+  }
 
   model[blockInfo] = value;
   fixedValues.push_back(blockInfo);
 
-  smt::expr addr, size;
+  BigNum addr, size;
   bool foundInterval = false;
 
   // Add interval and check if addresses are disjoint
   if (blockInfo.field == BlockFieldInfo::BlockFieldInfoEnum::BlockAddress) {
-    addr = value;
+    addr = std::move(value);
     BlockFieldInfo sizeInfo(BlockFieldInfo::BlockFieldInfoEnum::BlockSize, blockInfo.bid);
     auto found = model.find(sizeInfo);
     // Check if size is already fixed
@@ -1725,7 +1978,7 @@ void MemoryAxiomPropagator::fixed(unsigned int i, const expr &expr) {
       foundInterval = true;
     }
   } else if (blockInfo.field == BlockFieldInfo::BlockFieldInfoEnum::BlockSize) {
-    size = value;
+    size = std::move(value);
     BlockFieldInfo addrInfo(BlockFieldInfo::BlockFieldInfoEnum::BlockAddress, blockInfo.bid);
     auto found = model.find(addrInfo);
     // Check if address is already fixed
@@ -1739,8 +1992,8 @@ void MemoryAxiomPropagator::fixed(unsigned int i, const expr &expr) {
     BlockData d1 = bidToExprMapping[blockInfo.bid];
     Interval add(addr, addr + size);
     if (Pointer::hasLocalBit()
-        ? (add.end.extract(bits_ptr_address - 1, bits_ptr_address - 1) == 0).isTrue()
-        : addr.add_no_uoverflow(size).isTrue()) {
+        ? add.end.extract(bits_ptr_address - 1) == 0
+        : (addr + size >= addr && addr + size >= size)) {
 
       add.bid = blockInfo.bid;
       Interval collision;

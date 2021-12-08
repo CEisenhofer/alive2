@@ -212,6 +212,7 @@ ostream& operator<<(ostream &os, const Model &m) {
 }
 
 void Result::printModel() {
+  Z3_set_ast_print_mode(ctx(), Z3_PRINT_SMTLIB2_COMPLIANT);
   printf("Native z3-model: %s\n", Z3_model_to_string(ctx(), m.m));
   fflush(stdout);
 }
