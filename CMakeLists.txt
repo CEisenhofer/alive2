@@ -126,6 +126,7 @@ add_library(tools STATIC ${TOOLS_SRCS})
 set(UTIL_SRCS
   "${PROJECT_BINARY_DIR}/version_gen.h"
   util/version.cpp
+  util/big_num.cpp
   util/compiler.cpp
   util/config.cpp
   util/errors.cpp
