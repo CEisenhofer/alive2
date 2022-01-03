@@ -1563,23 +1563,6 @@ bool IntervalTree::addOrIntersect(const Interval &interval, Interval *collision)
   return false;
 }
 
-static void setNumber(std::optional<util::BigNum>& opt, const smt::expr& e, const unsigned bits) {
-  uint64_t i;
-  if (e.isUInt(i)) {
-    opt.emplace(i, bits);
-    return;
-  }
-  opt.emplace(e.getBinaryString(), bits);
-}
-
-static void setBool(std::optional<bool>& opt, const smt::expr& e) {
-  if (e.isTrue()) {
-    opt.emplace(true);
-  }
-  assert(e.isFalse());
-  opt.emplace(false);
-}
-
 void BlockFieldInfo::remove() {
   switch (field) {
     case BlockAddress:
@@ -1600,18 +1583,23 @@ void BlockFieldInfo::remove() {
 }
 
 void BlockFieldInfo::add(const smt::expr &expr) {
+  bool succ;
   switch (field) {
     case BlockAddress:
-      setNumber(block->addrValue, expr, bits_ptr_address);
+      succ = block->addAddr(expr);
+      assert(succ);
       return;
     case BlockSize:
-      setNumber(block->sizeValue, expr, expr.bits());
+      succ = block->addSize(expr);
+      assert(succ);
       return;
     case BlockAllocated:
-      setBool(block->allocatedValue, expr);
+      succ = block->addAllocated(expr);
+      assert(succ);
       return;
     case BlockAlive:
-      setBool(block->aliveValue, expr);
+      succ = block->addAlive(expr);
+      assert(succ);
       return;
     default:
       assert(false);

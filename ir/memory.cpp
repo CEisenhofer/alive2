@@ -667,6 +667,59 @@ weak_ordering Memory::MemBlock::operator<=>(const MemBlock &rhs) const {
   return weak_ordering::equivalent;
 }
 
+static bool setNumber(std::optional<util::BigNum>& opt, const smt::expr& e, const unsigned bits) {
+  if (!e.isConst())
+    return false;
+  uint64_t i;
+  if (e.isUInt(i)) {
+    opt.emplace(i, bits);
+    return true;
+  }
+  opt.emplace(e.getBinaryString(), bits);
+  return true;
+}
+
+static bool setBool(std::optional<bool>& opt, const smt::expr& e) {
+  if (e.isTrue()) {
+    opt.emplace(true);
+    return true;
+  }
+  if (e.isFalse()) {
+    opt.emplace(false);
+    return true;
+  }
+  return false;
+}
+
+Memory::BlockData::BlockData(bool local, uint64_t bid, const expr & addr, const expr & size, const expr & align, const expr & allocated, const expr & alive)
+            : local(local), bid(bid), addrExpr(addr), sizeExpr(size), alignExpr(align), allocatedExpr(allocated), aliveExpr(alive) {
+  addAddr(addr);
+  addSize(size);
+  addAllocated(allocated);
+  addAlive(alive);
+}
+
+bool Memory::BlockData::addAddr(const smt::expr& e) {
+  return setNumber(addrValue, e, bits_ptr_address);
+}
+bool Memory::BlockData::addSize(const smt::expr& e) {
+  return setNumber(sizeValue, e, e.bits());
+}
+bool Memory::BlockData::addAllocated(const smt::expr& e) {
+  return setBool(allocatedValue, e);
+}
+bool Memory::BlockData::addAlive(const smt::expr& e) {
+  return setBool(aliveValue, e);
+}
+
+std::string Memory::BlockData::toString() const {
+  return "Block: " + std::to_string(bid) +
+    "; addr: " + addrExpr.toString() + (addrValue ? " (" + (*addrValue).toString() + ")" : "" ) +
+    "; size: " + sizeExpr.toString() + (sizeValue ? " (" + (*sizeValue).toString() + ")" : "" ) +
+    "; align: " + alignExpr.toString() +
+    "; allocated: " + allocatedExpr.toString() + (allocatedValue ? (" ("s + ((*allocatedValue) ? "true" : "false") + ")") : "" ) +
+    "; alive: " + aliveExpr.toString() + (aliveValue ? (" ("s + ((*aliveValue) ? "true" : "false") + ")") : "" );
+}
 
 static set<Pointer> all_leaf_ptrs(const Memory &m, const expr &ptr) {
   set<Pointer> ptrs;

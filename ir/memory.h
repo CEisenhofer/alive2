@@ -159,24 +159,14 @@ public:
             : BlockData(local, bid, addr, size, align, true, true) {}
 
     BlockData(bool local, uint64_t bid, const smt::expr &addr, const smt::expr &size, const smt::expr &align,
-              const smt::expr &allocated, const smt::expr &alive)
-            : local(local), bid(bid), addrExpr(addr), sizeExpr(size), alignExpr(align), allocatedExpr(allocated), aliveExpr(alive) {
-      uint64_t x;
-      if (addrExpr.isUInt(x))
-        addrValue.emplace(x, addrExpr.bits());
-      if (sizeExpr.isUInt(x))
-        sizeValue.emplace(x, sizeExpr.bits());
-      if (allocated.isTrue())
-        allocatedValue.emplace(true);
-      if (allocated.isFalse())
-        allocatedValue.emplace(false);
-      if (alive.isTrue())
-        aliveValue.emplace(true);
-      if (alive.isFalse())
-        aliveValue.emplace(false);
-    }
+              const smt::expr &allocated, const smt::expr &alive);
 
     BlockData(const BlockData &) = default;
+
+    bool addAddr(const smt::expr& e);
+    bool addSize(const smt::expr& e);
+    bool addAllocated(const smt::expr& e);
+    bool addAlive(const smt::expr& e);
 
     bool isValid() const {
       return addrValue && sizeValue && allocatedValue && *allocatedValue && aliveValue && *aliveValue;
@@ -184,14 +174,7 @@ public:
 
     auto operator<=>(const BlockData &rhs) const = default;
 
-    std::string toString() const {
-      return "Block: " + std::to_string(bid) +
-             "; addr: " + addrExpr.toString() + (addrValue ? " (" + (*addrValue).toString() + ")" : "" ) +
-             "; size: " + sizeExpr.toString() + (sizeValue ? " (" + (*sizeValue).toString() + ")" : "" ) +
-             "; align: " + alignExpr.toString() +
-             "; allocated: " + allocatedExpr.toString() + (allocatedValue ? (" ("s + ((*allocatedValue) ? "true" : "false") + ")") : "" ) +
-             "; alive: " + aliveExpr.toString() + (aliveValue ? (" ("s + ((*aliveValue) ? "true" : "false") + ")") : "" );
-    }
+    std::string toString() const;
 };
 
 private:
