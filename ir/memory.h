@@ -8,6 +8,7 @@
 #include "ir/type.h"
 #include "smt/expr.h"
 #include "smt/exprs.h"
+#include "util/big_num.h"
 #include "util/spaceship.h"
 #include <compare>
 #include <map>
@@ -16,6 +17,8 @@
 #include <set>
 #include <utility>
 #include <vector>
+
+using namespace std::string_literals;
 
 namespace smt {
 class Model;
@@ -134,6 +137,65 @@ class Memory {
     std::weak_ordering operator<=>(const MemBlock &rhs) const;
   };
 
+public:
+  struct BlockData {
+
+    bool local;
+    uint64_t bid; // short
+    smt::expr addrExpr;
+    smt::expr sizeExpr; // Not extended/truncated. The unaltered constant
+    smt::expr alignExpr;
+    smt::expr allocatedExpr;
+    smt::expr aliveExpr;
+    std::optional<util::BigNum> addrValue;
+    std::optional<util::BigNum> sizeValue;
+    // value of aligned is currently not required
+    std::optional<bool> allocatedValue;
+    std::optional<bool> aliveValue;
+
+    BlockData() : bid(UINT32_MAX) {}
+
+    BlockData(bool local, uint64_t bid, const smt::expr &addr, const smt::expr &size, const smt::expr &align)
+            : BlockData(local, bid, addr, size, align, true, true) {}
+
+    BlockData(bool local, uint64_t bid, const smt::expr &addr, const smt::expr &size, const smt::expr &align,
+              const smt::expr &allocated, const smt::expr &alive)
+            : local(local), bid(bid), addrExpr(addr), sizeExpr(size), alignExpr(align), allocatedExpr(allocated), aliveExpr(alive) {
+      uint64_t x;
+      if (addrExpr.isUInt(x))
+        addrValue.emplace(x, addrExpr.bits());
+      if (sizeExpr.isUInt(x))
+        sizeValue.emplace(x, sizeExpr.bits());
+      if (allocated.isTrue())
+        allocatedValue.emplace(true);
+      if (allocated.isFalse())
+        allocatedValue.emplace(false);
+      if (alive.isTrue())
+        aliveValue.emplace(true);
+      if (alive.isFalse())
+        aliveValue.emplace(false);
+    }
+
+    BlockData(const BlockData &) = default;
+
+    bool isValid() const {
+      return addrValue && sizeValue && allocatedValue && *allocatedValue && aliveValue && *aliveValue;
+    }
+
+    auto operator<=>(const BlockData &rhs) const = default;
+
+    std::string toString() const {
+      return "Block: " + std::to_string(bid) +
+             "; addr: " + addrExpr.toString() + (addrValue ? " (" + (*addrValue).toString() + ")" : "" ) +
+             "; size: " + sizeExpr.toString() + (sizeValue ? " (" + (*sizeValue).toString() + ")" : "" ) +
+             "; align: " + alignExpr.toString() +
+             "; allocated: " + allocatedExpr.toString() + (allocatedValue ? (" ("s + ((*allocatedValue) ? "true" : "false") + ")") : "" ) +
+             "; alive: " + aliveExpr.toString() + (aliveValue ? (" ("s + ((*aliveValue) ? "true" : "false") + ")") : "" );
+    }
+};
+
+private:
+
   std::vector<MemBlock> non_local_block_val;
   std::vector<MemBlock> local_block_val;
 
@@ -151,6 +213,8 @@ class Memory {
 
   std::vector<unsigned> byval_blks;
   AliasSet escaped_local_blks;
+
+  std::vector<BlockData> local_blks_to_register;
 
   bool hasEscapedLocals() const {
     return escaped_local_blks.numMayAlias(true) > 0;
@@ -210,7 +274,7 @@ class Memory {
                              const smt::expr &short_bid,
                              const smt::expr &size, const smt::expr &align,
                              unsigned align_bits);
-  
+
   bool noAxiomBid(unsigned bid, const Memory& tgt) const;
 
 public:
@@ -263,6 +327,7 @@ public:
                           const FnRetData &b);
     auto operator<=>(const FnRetData &rhs) const = default;
   };
+
 
   std::pair<smt::expr,FnRetData>
   mkFnRet(const char *name, const std::vector<PtrInput> &ptr_inputs,

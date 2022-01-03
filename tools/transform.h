@@ -5,6 +5,7 @@
 
 #include "ir/function.h"
 #include "ir/state.h"
+#include "ir/memory.h"
 #include "smt/solver.h"
 #include "util/big_num.h"
 #include "util/errors.h"
@@ -12,15 +13,6 @@
 #include <ostream>
 #include <unordered_map>
 #include <stack>
-
-namespace tools {
-struct BlockFieldInfo;
-}
-
-template<>
-struct std::hash<tools::BlockFieldInfo> {
-  std::size_t operator()(const tools::BlockFieldInfo &k) const;
-};
 
 namespace tools {
 
@@ -46,12 +38,16 @@ class TypingAssignments {
   smt::Result r;
   bool has_only_one_solution = false;
   bool is_unsat = false;
+
   TypingAssignments(const smt::expr &e);
 
 public:
   bool operator!() const { return !(bool)*this; }
+
   operator bool() const;
+
   void operator++(void);
+
   bool hasSingleTyping() const { return has_only_one_solution; }
 
   friend class TransformVerify;
@@ -60,14 +56,18 @@ public:
 
 class TransformVerify {
   Transform &t;
-  std::unordered_map<std::string, const IR::Instr*> tgt_instrs;
+  std::unordered_map<std::string, const IR::Instr *> tgt_instrs;
   bool check_each_var;
 
 public:
   TransformVerify(Transform &t, bool check_each_var);
-  std::pair<std::unique_ptr<IR::State>,std::unique_ptr<IR::State>> exec() const;
+
+  std::pair<std::unique_ptr<IR::State>, std::unique_ptr<IR::State>> exec() const;
+
   util::Errors verify() const;
+
   TypingAssignments getTypings() const;
+
   void fixupTypes(const TypingAssignments &ty);
 };
 
@@ -122,75 +122,54 @@ struct BlockFieldInfo {
     None = 0,
     BlockAddress = 1,
     BlockSize = 2,
+    BlockAlive = 3,
+    BlockAllocated = 4,
   };
 
+
+  IR::Memory::BlockData* block;
   BlockFieldInfoEnum field;
-  unsigned bid;
 
-  BlockFieldInfo() : field(None), bid(0) {}
+  BlockFieldInfo(IR::Memory::BlockData *block, BlockFieldInfoEnum field): block(block), field(field) {}
+  BlockFieldInfo(const BlockFieldInfo& other) = default;
+  BlockFieldInfo() = default;
 
-  BlockFieldInfo(const BlockFieldInfo &) = default;
-
-  BlockFieldInfo(BlockFieldInfoEnum field, unsigned bid) : field(field), bid(bid) {}
-
-
-  bool operator==(const BlockFieldInfo &other) const {
-    return field == other.field && bid == other.bid;
+  bool operator==(const BlockFieldInfo& other) const {
+    return block == other.block && field == other.field;
   }
 
-  std::string toString() {
-    return "Bid: " + std::to_string(bid) + "; " + (field == None ? "None" : field == BlockAddress ? "Address" : "Size");
-  }
-};
+  void remove();
 
-struct BlockData {
-
-  unsigned bid;
-  smt::expr addr;
-  smt::expr size; // Not extended/truncated. The unaltered constant
-  smt::expr align;
-
-  BlockData() : bid(UINT32_MAX) {}
-
-  BlockData(unsigned int bid, const smt::expr &addr, const smt::expr &size, const smt::expr &align)
-          : bid(bid), addr(addr), size(size), align(align) {}
-
-  BlockData(const BlockData &) = default;
-
-  std::string toString() {
-    return "Block: " + std::to_string(bid) +
-           "; addr: " + addr.toString() + "; size: " + size.toString() + "; align: " + align.toString();
-  }
+  void add(const smt::expr &expr);
 };
 
 class MemoryAxiomPropagator : public smt::Solver, smt::PropagatorBase {
 
   const IR::Memory &src_memory, &tgt_memory;
 
-  std::unordered_map<unsigned, BlockFieldInfo>
-          idToFieldMapping; // Maps Z3 propagator id -> block information field (inverse from fieldToIdMapping)
-  std::unordered_map<BlockFieldInfo, unsigned>
-          fieldToIdMapping; // Maps block information field -> Z3 propagator id (inverse from idToFieldMapping)
-  std::unordered_map<unsigned, BlockData> bidToExprMapping; // Maps bid to the z3 expressions
+  std::vector<IR::Memory::BlockData> registeredBlocks; // BlockFieldInfo point to these elements (==> these pointers are valid)
 
-  // TODO: Make it work for more than 64 bit (arbitrary integers: performance problem)
-  std::unordered_map<BlockFieldInfo, util::BigNum> model; // Maps bid field info -> value of that field
+  std::unordered_map<unsigned, BlockFieldInfo> idToField; // Maps Z3 propagator id -> block information field
+  std::unordered_map<unsigned, IR::Memory::BlockData*> bidToData; // Maps bid to the z3 expressions and (partial) model
 
   std::vector<BlockFieldInfo> fixedValues; // The fixed values in the order they were assigned
-  std::vector<Interval> intervalValues; // The complete memory-blocks in the order they were completed
+  std::vector<Interval> globalIntervalValues; // The complete global memory-blocks in the order they were completed
+  std::vector<Interval> localIntervalValues; // The complete local memory-blocks in the order they were completed
 
   std::stack<unsigned> fixedCnt; // Number of fixed values per decision level
-  std::stack<unsigned> intervalCnt; // Number of complete memory-blocks per decision level
+  std::stack<unsigned> globalIntervalCnt; // Number of complete global memory-blocks per decision level
+  std::stack<unsigned> localIntervalCnt; // Number of complete local memory-blocks per decision level
 
   // The addresses + sizes in the memory (used for block disjointness)
-  // Tag: bid (unsigned)
-  IntervalTree blockIntervals;
+  IntervalTree globalIntervals;
+  IntervalTree localIntervals;
 
-  void registerBlocks();
+  void registerBlock(const IR::Memory::BlockData& toRegister);
+  void registerLocalBlocks();
+  void registerGlobalBlocks();
 
 public:
-  MemoryAxiomPropagator(const IR::Memory &src_memory,
-                        const IR::Memory &tgt_memory);
+  MemoryAxiomPropagator(const IR::Memory &src, const IR::Memory &tgt);
 
   ~MemoryAxiomPropagator() override;
 

@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <vector>
 
 // Copyright (c) 2018-present The Alive2 Authors.
 // Distributed under the MIT license that can be found in the LICENSE file.
@@ -9,38 +10,35 @@ namespace util {
 
 // We could use also use arithmetic over z3 constants but this is slow
 class BigNum {
+
   /**
-   * Binary string
-   * Contains exactly bitWidth 0/1.
-   * If set to nullptr the value of u64 is taken
+   * Representation of the number
    */
-  char *arr;
+  std::vector<uint64_t> arr;
   /**
    * The number of bits
    */
   size_t bitWidth;
-  /**
-   * If number is short enough
-   */
-  uint64_t u64;
 
 public:
 
-  BigNum() : arr(nullptr), bitWidth(0), u64(0) {}
+  BigNum() : arr(), bitWidth(0) {}
 
-  BigNum(size_t bitWidth) : arr(nullptr), bitWidth(bitWidth), u64(0) {}
+  explicit BigNum(size_t bitWidth) : arr(), bitWidth(bitWidth) {}
 
   BigNum(uint64_t u64, size_t bitWidth);
 
   BigNum(const char *arr, size_t bitWidth);
 
+  BigNum(std::vector<uint64_t> &&arr, size_t bitWidth);
+
   BigNum(const BigNum &other);
 
-  ~BigNum();
+  virtual ~BigNum();
 
-  static BigNum truncOrExtend(uint64_t u64, size_t toBitWidth);
-
-  static BigNum truncOrExtend(const char *arr, size_t toBitWidth);
+  size_t bits() const {
+    return bitWidth;
+  }
 
   BigNum operator+(const BigNum &other) const;
 
@@ -56,10 +54,14 @@ public:
 
   bool operator>=(const BigNum &other) const { return other <= *this; }
 
-  char extract(size_t pos) const;
+  bool extract(size_t pos) const;
 
-  std::string toString() {
-    return (arr == nullptr ? std::to_string(u64) : std::string(arr)) + " (" + std::to_string(bitWidth) + "bits)";
+  operator bool() const;
+
+  std::string toString() const;
+
+  std::string toString2() {
+    return toString() + " (" + std::to_string(bitWidth) + "bits)";
   }
 
 };

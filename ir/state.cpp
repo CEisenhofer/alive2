@@ -845,9 +845,13 @@ State::addFnCall(const string &name, vector<StateValue> &&inputs,
     ChoiceExpr<FnCallOutput> data;
 
     for (auto &[in, out] : fn_call_data[name]) {
-      auto refined = in.refinedBy(*this, inputs, ptr_inputs,
-                                  analysis.ranges_fn_calls, memory,
-                                  reads_memory, argmemonly, noret, willret);
+      auto refined = expr::mkFreshVar("refined", false);
+      auto ret = in.refinedBy(*this, inputs, ptr_inputs,
+                   analysis.ranges_fn_calls, memory,
+                   reads_memory, argmemonly, noret, willret);
+      printf("Refined %s: %s\n\n", refined.toString().c_str(), ret.toString().c_str());
+      fflush(stdout);
+      placeholders.push_back(refined);
       data.add(out, move(refined));
     }
 

@@ -124,7 +124,7 @@ void execFunction(llvm::Function &F, llvm::TargetLibraryInfoWrapperPass &TLI,
     const auto &fn = t.src;
     const auto *bb = &fn.getFirstBB();
 
-    Solver s(SolverType::Simple);
+    Solver s(true);
 
     for (auto &[var, val] : state.getValues()) {
       auto &name = var->getName();

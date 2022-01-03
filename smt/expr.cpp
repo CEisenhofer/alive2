@@ -355,6 +355,9 @@ expr expr::IntUMax(unsigned bits) {
 }
 
 std::string expr::toString() const {
+  if (!isValid()) {
+    return "null";
+  }
   string s = Z3_ast_to_string(ctx(), ast());
   return s;
 }

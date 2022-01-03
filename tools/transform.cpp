@@ -36,11 +36,6 @@ using namespace util;
 using namespace std;
 using util::config::dbg;
 
-std::size_t
-std::hash<tools::BlockFieldInfo>::operator()(const tools::BlockFieldInfo &k) const {
-  return (k.bid << 2) | k.field;
-}
-
 static bool is_arbitrary(const expr &e) {
   if (e.isConst())
     return false;
@@ -474,6 +469,10 @@ static void check_refinement(Errors &errs, const Transform &t,
     pre_src_exists = pre_src.subst(repls);
     pre_src_forall = pre_src_exists.eq(pre_src) ? true : pre_src;
   }
+  printf("Pre-Src: \n%s\n\n\nPre-Tgt: \n%s\n\n\n Src-Fn: \n%s\n\n\nTgt-Fn: \n%s\n\n\n",
+         pre_src_exists.toString().c_str(), pre_tgt.toString().c_str(),
+         src_state.getFnPre().toString().c_str(), tgt_state.getFnPre().toString().c_str());
+  fflush(stdout);
   expr pre = pre_src_exists && pre_tgt && src_state.getFnPre();
   pre_src_forall &= tgt_state.getFnPre();
 
@@ -493,6 +492,8 @@ static void check_refinement(Errors &errs, const Transform &t,
 
   auto check = [&](expr &&e, auto &&printer, const char *msg) {
     e = mk_fml(move(e));
+    printf("Problem: \n%s\n\n", e.toString().c_str());
+    fflush(stdout);
     auto res = MemoryAxiomPropagator::check_expr(src_state.getMemory(),
                                                  tgt_state.getMemory(), e);
     if (!res.isUnsat() && !error(errs, src_state, tgt_state, res, var, msg,
@@ -1191,7 +1192,7 @@ Errors TransformVerify::verify() const {
 }
 
 
-TypingAssignments::TypingAssignments(const expr &e) : s(SolverType::Simple), sneg(SolverType::Simple) {
+TypingAssignments::TypingAssignments(const expr &e) : s(true), sneg(true) {
   if (e.isTrue()) {
     has_only_one_solution = true;
   } else {
@@ -1562,23 +1563,130 @@ bool IntervalTree::addOrIntersect(const Interval &interval, Interval *collision)
   return false;
 }
 
-MemoryAxiomPropagator::MemoryAxiomPropagator(const Memory &src_memory,
-                                             const Memory &tgt_memory)
-        : smt::Solver(SolverType::Tactics), smt::PropagatorBase(this), src_memory(src_memory),
-          tgt_memory(tgt_memory) {
+static void setNumber(std::optional<util::BigNum>& opt, const smt::expr& e, const unsigned bits) {
+  uint64_t i;
+  if (e.isUInt(i)) {
+    opt.emplace(i, bits);
+    return;
+  }
+  opt.emplace(e.getBinaryString(), bits);
+}
+
+static void setBool(std::optional<bool>& opt, const smt::expr& e) {
+  if (e.isTrue()) {
+    opt.emplace(true);
+  }
+  assert(e.isFalse());
+  opt.emplace(false);
+}
+
+void BlockFieldInfo::remove() {
+  switch (field) {
+    case BlockAddress:
+      block->addrValue.reset();
+      return;
+    case BlockSize:
+      block->sizeValue.reset();
+      return;
+    case BlockAllocated:
+      block->allocatedValue.reset();
+      return;
+    case BlockAlive:
+      block->aliveValue.reset();
+      return;
+    default:
+      assert(false);
+  }
+}
+
+void BlockFieldInfo::add(const smt::expr &expr) {
+  switch (field) {
+    case BlockAddress:
+      setNumber(block->addrValue, expr, bits_ptr_address);
+      return;
+    case BlockSize:
+      setNumber(block->sizeValue, expr, expr.bits());
+      return;
+    case BlockAllocated:
+      setBool(block->allocatedValue, expr);
+      return;
+    case BlockAlive:
+      setBool(block->aliveValue, expr);
+      return;
+    default:
+      assert(false);
+  }
+}
+
+MemoryAxiomPropagator::MemoryAxiomPropagator(const IR::Memory &src, const IR::Memory &tgt)
+        : smt::Solver(false), smt::PropagatorBase(this),
+        src_memory(src), tgt_memory(tgt) {
   register_fixed();
   register_final();
 
-  registerBlocks();
+  registerGlobalBlocks();
+  //registerLocalBlocks();
 }
 
 MemoryAxiomPropagator::~MemoryAxiomPropagator() {
 
 }
 
-void MemoryAxiomPropagator::registerBlocks() {
+void MemoryAxiomPropagator::registerBlock(const IR::Memory::BlockData& toRegister) {
 
-  printf("\nRegistering ids!\n\n");
+    registeredBlocks.push_back(toRegister);
+
+    BlockFieldInfo addrInfo(&registeredBlocks.back(), BlockFieldInfo::BlockAddress);
+    BlockFieldInfo sizeInfo(&registeredBlocks.back(), BlockFieldInfo::BlockSize);
+    BlockFieldInfo allocatedInfo(&registeredBlocks.back(), BlockFieldInfo::BlockAllocated);
+    BlockFieldInfo aliveInfo(&registeredBlocks.back(), BlockFieldInfo::BlockAlive);
+
+    unsigned id;
+
+    if (!toRegister.addrValue) {
+      id = register_expr(toRegister.addrExpr);
+      idToField.emplace(std::make_pair(id, addrInfo));
+    }
+    if (!toRegister.sizeValue) {
+      id = register_expr(toRegister.sizeExpr);
+      idToField.emplace(std::make_pair(id, sizeInfo));
+    }
+    if (!toRegister.allocatedValue) {
+      id = register_expr(toRegister.allocatedExpr);
+      idToField.emplace(std::make_pair(id, allocatedInfo));
+    }
+    if (!toRegister.aliveValue) {
+      id = register_expr(toRegister.aliveExpr);
+      idToField.emplace(std::make_pair(id, aliveInfo));
+    }
+
+    if (toRegister.isValid()) {
+      Interval interval(*toRegister.addrValue, *toRegister.addrValue + *toRegister.sizeValue);
+      if (interval.isPositive()) {
+        auto& intervals = toRegister.local ? localIntervals : globalIntervals;
+        auto& intervalValues = toRegister.local ? localIntervalValues : globalIntervalValues;
+
+        interval.bid = toRegister.bid;
+        bool intersects = intervals.addOrIntersect(interval, nullptr);
+        assert(!intersects);
+        intervalValues.push_back(interval);
+      }
+    }
+
+    bidToData[toRegister.bid] = &registeredBlocks.back();
+}
+
+void MemoryAxiomPropagator::registerLocalBlocks() {
+  printf("\nRegistering locals!\n\n");
+  fflush(stdout);
+
+  for (const auto& data : src_memory.local_blks_to_register)
+    registerBlock(data);
+}
+
+void MemoryAxiomPropagator::registerGlobalBlocks() {
+
+  printf("\nRegistering globals!\n\n");
   fflush(stdout);
 
   if (num_locals_src == 0 && num_locals_tgt == 0 && num_nonlocals == 0)
@@ -1595,236 +1703,91 @@ void MemoryAxiomPropagator::registerBlocks() {
       continue;
 
     Pointer ptr(src_memory, bid, false);
-    expr addr = ptr.getAddress();
-    expr size = ptr.blockSize();
-    expr align = ptr.blockAlignment();
-    util::BigNum addrValue, sizeValue;
-
-    unsigned id;
-    BlockFieldInfo addrInfo(BlockFieldInfo::BlockFieldInfoEnum::BlockAddress, bid);
-    BlockFieldInfo sizeInfo(BlockFieldInfo::BlockFieldInfoEnum::BlockSize, bid);
-
-    bool bothConst = true;
-
-    if (!addr.isConst()) {
-      id = register_expr(addr);
-      printf("Registering address-expr: %s\n", addr.toString().c_str());
-      fflush(stdout);
-      idToFieldMapping[id] = addrInfo;
-      fieldToIdMapping[addrInfo] = id;
-      bothConst = false;
-    } else {
-      uint64_t u64;
-      if (addr.isUInt(u64))
-        addrValue = std::move(BigNum(u64, addr.bits()));
-      else
-        addrValue = std::move(BigNum(addr.getBinaryString(), addr.bits()));
-      model[addrInfo] = addrValue;
-      fixedValues.push_back(addrInfo);
-      uint64_t s;
-      addr.isUInt(s);
-      printf("Fixed address a-priori: %llu\n", (long long unsigned int)s);
-      fflush(stdout);
-
-    }
-    if (!size.isConst()) {
-      id = register_expr(size);
-      printf("Registering size-expr: %s\n", addr.toString().c_str());
-      fflush(stdout);
-      idToFieldMapping[id] = sizeInfo;
-      fieldToIdMapping[sizeInfo] = id;
-      bothConst = false;
-    } else {
-      uint64_t u64;
-      if (size.isUInt(u64))
-        sizeValue = std::move(BigNum::truncOrExtend(u64, bits_ptr_address));
-      else
-        sizeValue = std::move(BigNum::truncOrExtend(size.getBinaryString(), addr.bits()));
-      model[sizeInfo] = sizeValue;
-      fixedValues.push_back(sizeInfo);
-      uint64_t s;
-      size.zextOrTrunc(bits_ptr_address).isUInt(s);
-      printf("Fixed size a-priori: %llu with bid: %i\n", (long long unsigned int)s, bid);
-      fflush(stdout);
-    }
-
-    if (bothConst) {
-      Interval interval(addrValue, addrValue + sizeValue);
-      if (interval.isPositive()) {
-        interval.bid = bid;
-        bool intersects = blockIntervals.addOrIntersect(interval, nullptr);
-        assert(!intersects);
-        intervalValues.push_back(interval);
-        printf("Added interval a-priori: %s\n", interval.toString().c_str());
-        fflush(stdout);
-      }
-    }
-
-    BlockData data(bid, addr, size, align);
-    bidToExprMapping[bid] = data;
+    IR::Memory::BlockData blockData(false, bid,
+                                    ptr.getAddress(), ptr.blockSize(), ptr.blockAlignment());
+    registerBlock(blockData);
   }
 }
 
 void MemoryAxiomPropagator::push() {
-  fixedCnt.push((unsigned)model.size());
-  intervalCnt.push((unsigned)intervalValues.size());
+  fixedCnt.push((unsigned)fixedValues.size());
+  localIntervalCnt.push((unsigned)localIntervalValues.size());
+  globalIntervalCnt.push((unsigned)globalIntervalValues.size());
 }
 
 void MemoryAxiomPropagator::pop(unsigned int num_scopes) {
   for (unsigned i = 0; i < num_scopes; i++) {
     unsigned previousFixedCnt = fixedCnt.top();
-    unsigned previousIntervalCnt = intervalCnt.top();
+    unsigned previousLocalIntervalCnt = localIntervalCnt.top();
+    unsigned previousGlobalIntervalCnt = globalIntervalCnt.top();
     fixedCnt.pop();
-    intervalCnt.pop();
+    localIntervalCnt.pop();
+    globalIntervalCnt.pop();
     for (auto j = fixedValues.size(); j > previousFixedCnt; j--) {
-      // size_t sz = model.size();
-      /* size_t removed = */model.erase(fixedValues[j - 1]);
-      // assert(sz == model.size() + 1 && removed == 1);
+      auto& toRemove = fixedValues[j - 1];
+      toRemove.remove();
     }
-    for (auto j = intervalValues.size(); j > previousIntervalCnt; j--) {
-      // size_t sz = blockIntervals.size();
-      /* size_t removed =*/ blockIntervals.erase(intervalValues[j - 1]);
-      printf("Removed interval: %s\n\n", intervalValues[j - 1].toString().c_str());
-      // bool b1 = sz == blockIntervals.size() + 1;
-      // bool b2 = removed == 1;
-      // if (!(b1 && b2)) {
-      //   printf(" ");
-      // }
-      // assert(sz == blockIntervals.size() + 1 && removed == 1);
+    for (auto j = localIntervalValues.size(); j > previousLocalIntervalCnt; j--) {
+      localIntervals.erase(localIntervalValues[j - 1]);
     }
-    // int prevValue = intervalValues.size();
+    for (auto j = globalIntervalValues.size(); j > previousGlobalIntervalCnt; j--) {
+      globalIntervals.erase(globalIntervalValues[j - 1]);
+    }
+    
     fixedValues.resize(previousFixedCnt);
-    intervalValues.resize(previousIntervalCnt);
-    // if (intervalValues.size() != blockIntervals.size()) {
-    //   printf("%i", prevValue);
-    // }
+    localIntervalValues.resize(previousLocalIntervalCnt);
+    globalIntervalValues.resize(previousGlobalIntervalCnt);
   }
   fflush(stdout);
 }
 
 void MemoryAxiomPropagator::fixed(unsigned int i, const expr &expr) {
-  BlockFieldInfo blockInfo = idToFieldMapping.at(i);
+  BlockFieldInfo fieldInfo = idToField.at(i);
 
   // Ordinary addresses may not be zero
-  if (blockInfo.field == BlockFieldInfo::BlockFieldInfoEnum::BlockAddress && expr.isZero()) {
+  if (fieldInfo.field == BlockFieldInfo::BlockFieldInfoEnum::BlockAddress && expr.isZero()) {
     this->conflict(1, &i);
     return;
   }
 
-  uint64_t s;
-  expr.isUInt(s);
-  printf("Fixed %s: %llu with bid: %i\n", blockInfo.field == BlockFieldInfo::BlockSize ? "size" : "address",
-         (long long unsigned int)s, blockInfo.bid);
-  fflush(stdout);
+  fieldInfo.add(expr);
+  fixedValues.push_back(fieldInfo);
 
-  BigNum value;
-  uint64_t u64;
-  if (blockInfo.field != BlockFieldInfo::BlockSize) {
-    if (expr.isUInt(u64))
-      value = std::move(BigNum(u64, expr.bits()));
-    else
-      value = std::move(BigNum(expr.getBinaryString(), expr.bits()));
-  } else {
-    if (expr.isUInt(u64))
-      value = std::move(BigNum::truncOrExtend(u64, bits_ptr_address));
-    else
-      value = std::move(BigNum::truncOrExtend(expr.getBinaryString(), bits_ptr_address));
-  }
-
-  model[blockInfo] = value;
-  fixedValues.push_back(blockInfo);
-
-  BigNum addr, size;
-  bool foundInterval = false;
-
-  // Add interval and check if addresses are disjoint
-  if (blockInfo.field == BlockFieldInfo::BlockFieldInfoEnum::BlockAddress) {
-    addr = std::move(value);
-    BlockFieldInfo sizeInfo(BlockFieldInfo::BlockFieldInfoEnum::BlockSize, blockInfo.bid);
-    auto found = model.find(sizeInfo);
-    // Check if size is already fixed
-    if (found != model.end()) {
-      size = found->second;
-      foundInterval = true;
-    }
-  } else if (blockInfo.field == BlockFieldInfo::BlockFieldInfoEnum::BlockSize) {
-    size = std::move(value);
-    BlockFieldInfo addrInfo(BlockFieldInfo::BlockFieldInfoEnum::BlockAddress, blockInfo.bid);
-    auto found = model.find(addrInfo);
-    // Check if address is already fixed
-    if (found != model.end()) {
-      addr = found->second;
-      foundInterval = true;
-    }
-  }
-
-  if (foundInterval) {
-    BlockData d1 = bidToExprMapping[blockInfo.bid];
-    Interval add(addr, addr + size);
+  if (fieldInfo.block->isValid()) {
+    IR::Memory::BlockData* d1 = fieldInfo.block;
+    Interval add(*d1->addrValue, *d1->addrValue + *d1->sizeValue);
     if (Pointer::hasLocalBit()
         ? add.end.extract(bits_ptr_address - 1) == 0
-        : (addr + size >= addr && addr + size >= size)) {
+        : (add.end >= *d1->addrValue && add.end >= *d1->sizeValue)) {
 
-      add.bid = blockInfo.bid;
+      add.bid = fieldInfo.block->bid;
       Interval collision;
+      auto& intervals = fieldInfo.block->local ? localIntervals : globalIntervals;
+      auto& intervalValues = fieldInfo.block->local ? localIntervalValues : globalIntervalValues;
       // Check for block collisions
-      if (blockIntervals.addOrIntersect(add, &collision)) {
-        BlockData d2 = bidToExprMapping[collision.bid];
+      if (intervals.addOrIntersect(add, &collision)) {
+        IR::Memory::BlockData* d2 = bidToData[collision.bid];
         smt::expr disjoint = IR::disjointBlocks(
-                d1.addr, d1.size.zextOrTrunc(bits_ptr_address),
-                d1.align, d2.addr, d2.size.zextOrTrunc(bits_ptr_address), d2.align);
+                d1->addrExpr, d1->sizeExpr.zextOrTrunc(bits_ptr_address), d1->alignExpr,
+                d2->addrExpr, d2->sizeExpr.zextOrTrunc(bits_ptr_address), d2->alignExpr);
         printf("Interval intersection: %s vs %s\n\n", add.toString().c_str(), collision.toString().c_str());
         fflush(stdout);
         this->propagate(0, nullptr, disjoint);
-        /*std::vector<unsigned> conflicting;
-        BlockFieldInfo addr1(BlockFieldInfo::BlockAddress, blockInfo.bid);
-        BlockFieldInfo addr2(BlockFieldInfo::BlockAddress, collision.tag);
-        BlockFieldInfo size1(BlockFieldInfo::BlockSize, blockInfo.bid);
-        BlockFieldInfo size2(BlockFieldInfo::BlockSize, collision.tag);
-        auto addr1Id = fieldToIdMapping.find(addr1);
-        auto addr2Id = fieldToIdMapping.find(addr2);
-        auto size1Id = fieldToIdMapping.find(size1);
-        auto size2Id = fieldToIdMapping.find(size2);
-        if (addr1Id != fieldToIdMapping.end()) {
-          conflicting.push_back(addr1Id->second);
-        }
-        if (addr2Id != fieldToIdMapping.end()) {
-          conflicting.push_back(addr2Id->second);
-        }
-        if (size1Id != fieldToIdMapping.end()) {
-          conflicting.push_back(size1Id->second);
-        }
-        if (size2Id != fieldToIdMapping.end()) {
-          conflicting.push_back(size2Id->second);
-        }
-        this->conflict(conflicting.size(), conflicting.data());*/
       } else {
         printf("Added interval: %s\n\n", add.toString().c_str());
         fflush(stdout);
         intervalValues.push_back(add);
       }
     } else {
-      auto truncatedSize = d1.size.zextOrTrunc(bits_ptr_address);
+      auto truncatedSize = d1->sizeExpr.zextOrTrunc(bits_ptr_address);
       printf("Overflow: %s\n\n", add.toString().c_str());
       fflush(stdout);
       this->propagate(0, nullptr,
                       Pointer::hasLocalBit()
                       // don't spill to local addr section
-                      ? (d1.addr + truncatedSize).extract(bits_ptr_address - 1, bits_ptr_address - 1) == 0
-                      : d1.addr.add_no_uoverflow(truncatedSize.zextOrTrunc(bits_ptr_address))
+                      ? (d1->addrExpr + truncatedSize).extract(bits_ptr_address - 1, bits_ptr_address - 1) == 0
+                      : d1->addrExpr.add_no_uoverflow(truncatedSize.zextOrTrunc(bits_ptr_address))
       );
-      /*std::vector<unsigned> conflicting;
-      BlockFieldInfo addr(BlockFieldInfo::BlockAddress, blockInfo.bid);
-      BlockFieldInfo size(BlockFieldInfo::BlockSize, blockInfo.bid);
-      auto addrId = fieldToIdMapping.find(addr);
-      auto sizeId = fieldToIdMapping.find(size);
-      if (addrId != fieldToIdMapping.end()) {
-        conflicting.push_back(addrId->second);
-      }
-      if (sizeId != fieldToIdMapping.end()) {
-        conflicting.push_back(sizeId->second);
-      }
-      this->conflict(conflicting.size(), conflicting.data());*/
     }
   }
 

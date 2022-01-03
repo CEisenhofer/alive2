@@ -226,10 +226,10 @@ void solver_tactic_verbose(bool yes) {
   tactic_verbose = yes;
 }
 
-Solver::Solver(SolverType type) : type(type) {
-  s = type == SolverType::Tactics
-      ? Z3_mk_solver_from_tactic(ctx(), tactic->t)
-      : Z3_mk_simple_solver(ctx());
+Solver::Solver(bool simple) {
+  s = simple
+      ? Z3_mk_simple_solver(ctx())
+      : Z3_mk_solver_from_tactic(ctx(), tactic->t);
   Z3_solver_inc_ref(ctx(), s);
 }
 
@@ -351,7 +351,7 @@ Result Solver::check() const {
 }
 
 Result check_expr(const expr &e) {
-  Solver s;
+  Solver s(false);
   s.add(e);
   return s.check();
 }

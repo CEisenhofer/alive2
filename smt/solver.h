@@ -101,12 +101,11 @@ enum SolverType {
 
 class Solver {
   Z3_solver s;
-  SolverType type;
   bool valid = true;
   bool is_unsat = false;
 
 public:
-  Solver(SolverType type = SolverType::Tactics);
+  Solver(bool simple);
 
   ~Solver();
 

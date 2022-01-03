@@ -166,6 +166,7 @@ private:
     auto operator<=>(const FnCallOutput &rhs) const = default;
   };
   std::map<std::string, std::map<FnCallInput, FnCallOutput>> fn_call_data;
+  std::vector<smt::expr> placeholders; // for lazy evaluation of funntion refinement
   smt::expr fn_call_pre = true;
   std::set<smt::expr> fn_call_qvars;
 

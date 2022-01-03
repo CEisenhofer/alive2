@@ -1485,6 +1485,14 @@ void Memory::mkLocalDisjAddrAxioms(const expr &allocated, const expr &short_bid,
     state->addPre((full_addr << shift) == 0);
   }
 
+  uint64_t short_bid_uint;
+  if (!short_bid.isUInt(short_bid_uint)) {
+    assert(false);
+  }
+
+  Pointer p(*this, short_bid_uint, true);
+  local_blks_to_register.emplace_back(true, short_bid_uint, full_addr, size, align, allocated, p.isBlockAlive());
+
   // addr + size only overflows for one case when obj is aligned
   expr no_ovfl;
   if (size.ule(align.zextOrTrunc(bits_size_t)).isTrue())
@@ -1552,8 +1560,7 @@ Memory::alloc(const expr &size, uint64_t align, BlockKind blockKind,
   bool is_null = !is_local && has_null_block && bid == 0;
 
   if (is_local) {
-    mkLocalDisjAddrAxioms(allocated, short_bid, size_zext, align_expr,
-                          align_bits);
+    mkLocalDisjAddrAxioms(allocated, short_bid, size_zext, align_expr, align_bits);
   } else {
     state->addAxiom(p.blockSize() == size_zext);
     state->addAxiom(p.isBlockAligned(align, true));
