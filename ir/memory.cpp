@@ -667,15 +667,15 @@ weak_ordering Memory::MemBlock::operator<=>(const MemBlock &rhs) const {
   return weak_ordering::equivalent;
 }
 
-static bool setNumber(std::optional<util::BigNum>& opt, const smt::expr& e, const unsigned bits) {
+static bool setNumber(util::BigNum*& opt, const smt::expr& e, const unsigned bits) {
   if (!e.isConst())
     return false;
   uint64_t i;
   if (e.isUInt(i)) {
-    opt.emplace(i, bits);
+    opt = new BigNum(i, bits);
     return true;
   }
-  opt.emplace(e.getBinaryString(), bits);
+  opt = new BigNum(e.getBinaryString(), bits);
   return true;
 }
 
@@ -692,18 +692,35 @@ static bool setBool(std::optional<bool>& opt, const smt::expr& e) {
 }
 
 Memory::BlockData::BlockData(bool local, uint64_t bid, const expr & addr, const expr & size, const expr & align, const expr & allocated, const expr & alive)
-            : local(local), bid(bid), addrExpr(addr), sizeExpr(size), alignExpr(align), allocatedExpr(allocated), aliveExpr(alive) {
+            : local(local), bid(bid), addrExpr(addr), sizeExpr(size), alignExpr(align), allocatedExpr(allocated), aliveExpr(alive),
+            addrValue(nullptr), sizeValue(nullptr), allocatedValue(nullptr), aliveValue(nullptr) {
   addAddr(addr);
   addSize(size);
   addAllocated(allocated);
   addAlive(alive);
 }
 
+Memory::BlockData::BlockData(const Memory::BlockData &o)
+          : local(o.local), bid(o.bid), addrExpr(o.addrExpr), sizeExpr(o.sizeExpr),
+          alignExpr(o.alignExpr), allocatedExpr(o.allocatedExpr), aliveExpr(o.aliveExpr),
+          addrValue(nullptr), sizeValue(nullptr), allocatedValue(o.allocatedValue), aliveValue(o.aliveValue) {
+  if (o.addrValue)
+    addrValue = new BigNum(*o.addrValue);
+  if (o.sizeValue)
+    sizeValue = new BigNum(*o.sizeValue);
+}
+
+Memory::BlockData::~BlockData() {
+  delete addrValue;
+  delete sizeValue;
+  addrValue = sizeValue = nullptr;
+}
+
 bool Memory::BlockData::addAddr(const smt::expr& e) {
-  return setNumber(addrValue, e, bits_ptr_address);
+  return setNumber(addrValue, e, e.bits());
 }
 bool Memory::BlockData::addSize(const smt::expr& e) {
-  return setNumber(sizeValue, e, e.bits());
+  return setNumber(sizeValue, e, bits_ptr_address);
 }
 bool Memory::BlockData::addAllocated(const smt::expr& e) {
   return setBool(allocatedValue, e);
@@ -2130,6 +2147,7 @@ Memory Memory::mkIf(const expr &cond, const Memory &then, const Memory &els) {
   ret.non_local_blk_size.add(els.non_local_blk_size);
   ret.non_local_blk_align.add(els.non_local_blk_align);
   ret.non_local_blk_kind.add(els.non_local_blk_kind);
+  ret.local_blks_to_register.insert(ret.local_blks_to_register.cend(), els.local_blks_to_register.cbegin(), els.local_blks_to_register.cend());
   assert(then.byval_blks == els.byval_blks);
   ret.escaped_local_blks.unionWith(els.escaped_local_blks);
 

@@ -852,7 +852,7 @@ State::addFnCall(const string &name, vector<StateValue> &&inputs,
       printf("Refined %s: %s\n\n", refined.toString().c_str(), ret.toString().c_str());
       fflush(stdout);
       placeholders.push_back(refined);
-      data.add(out, move(refined));
+      data.add(out, move(ret));
     }
 
     if (data) {

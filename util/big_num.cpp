@@ -38,9 +38,6 @@ BigNum::BigNum(const BigNum &other) = default;
 BigNum::~BigNum() = default;
 
 BigNum BigNum::operator+(const BigNum &other) const {
-  if (!(bitWidth == other.bitWidth)) {
-    time(NULL);
-  }
   assert(bitWidth == other.bitWidth);
   std::vector<uint64_t> res;
   res.resize(arr.size(), 0ull);

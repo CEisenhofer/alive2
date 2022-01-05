@@ -34,7 +34,7 @@ using namespace smt;
 using namespace tools;
 using namespace util;
 using namespace std;
-using util::config::dbg;
+using config::dbg;
 
 static bool is_arbitrary(const expr &e) {
   if (e.isConst())
@@ -108,8 +108,8 @@ void tools::print_model_val(ostream &os, const State &st, const Model &m,
   for (unsigned i = 0, e = agg->numElementsConst(); i < e; ++i) {
     if (i != 0)
       os << ", ";
-    tools::print_model_val(os, st, m, var, agg->getChild(i),
-                           agg->extract(val, i), child + i);
+    print_model_val(os, st, m, var, agg->getChild(i),
+                    agg->extract(val, i), child + i);
   }
   os << (type.isStructType() ? " }" : " >");
 }
@@ -1051,7 +1051,7 @@ static void calculateAndInitConstants(Transform &t) {
   little_endian = t.src.isLittleEndian();
 
   if (config::debug)
-    config::dbg() << "\nnum_locals_src: " << num_locals_src
+    dbg() << "\nnum_locals_src: " << num_locals_src
                   << "\nnum_locals_tgt: " << num_locals_tgt
                   << "\nnum_nonlocals_src: " << num_nonlocals_src
                   << "\nnum_nonlocals: " << num_nonlocals
@@ -1490,22 +1490,22 @@ ostream& operator<<(ostream &os, const Transform &t) {
 Interval::Interval()
         : start(bits_ptr_address), end(bits_ptr_address) {}
 
-Interval::Interval(const util::BigNum &start, const util::BigNum &end) : start(start), end(end) {}
+Interval::Interval(const BigNum &start, const BigNum &end) : start(start), end(end) {}
 
 bool Interval::intersect(const Interval &o) const {
-  smt::expr expr = start >= o.end || o.start >= end;
+  expr expr = start >= o.end || o.start >= end;
   assert(expr.isBool());
   return expr.isFalse();
 }
 
 bool Interval::isPositive() const {
-  smt::expr expr = start < end;
+  expr expr = start < end;
   assert(expr.isBool());
   return expr.isTrue();
 }
 
 bool Interval::isNegative() const {
-  smt::expr expr = end < start;
+  expr expr = end < start;
   assert(expr.isBool());
   return expr.isTrue();
 }
@@ -1566,10 +1566,12 @@ bool IntervalTree::addOrIntersect(const Interval &interval, Interval *collision)
 void BlockFieldInfo::remove() {
   switch (field) {
     case BlockAddress:
-      block->addrValue.reset();
+      delete block->addrValue;
+      block->addrValue = nullptr;
       return;
     case BlockSize:
-      block->sizeValue.reset();
+      delete block->sizeValue;
+      block->sizeValue = nullptr;
       return;
     case BlockAllocated:
       block->allocatedValue.reset();
@@ -1582,7 +1584,7 @@ void BlockFieldInfo::remove() {
   }
 }
 
-void BlockFieldInfo::add(const smt::expr &expr) {
+void BlockFieldInfo::add(const expr &expr) {
   bool succ;
   switch (field) {
     case BlockAddress:
@@ -1606,9 +1608,9 @@ void BlockFieldInfo::add(const smt::expr &expr) {
   }
 }
 
-MemoryAxiomPropagator::MemoryAxiomPropagator(const IR::Memory &src, const IR::Memory &tgt)
-        : smt::Solver(false), smt::PropagatorBase(this),
-        src_memory(src), tgt_memory(tgt) {
+MemoryAxiomPropagator::MemoryAxiomPropagator(const Memory &src, const Memory &tgt)
+        : Solver(false), PropagatorBase(this),
+          src_memory(src), tgt_memory(tgt) {
   register_fixed();
   register_final();
 
@@ -1617,51 +1619,52 @@ MemoryAxiomPropagator::MemoryAxiomPropagator(const IR::Memory &src, const IR::Me
 }
 
 MemoryAxiomPropagator::~MemoryAxiomPropagator() {
-
+  for (auto& ptr : registeredBlocks) {
+    delete ptr;
+  }
 }
 
-void MemoryAxiomPropagator::registerBlock(const IR::Memory::BlockData& toRegister) {
+void MemoryAxiomPropagator::registerBlock(Memory::BlockData* toRegister) {
 
     registeredBlocks.push_back(toRegister);
+    bidToData[toRegister->bid] = toRegister;
 
-    BlockFieldInfo addrInfo(&registeredBlocks.back(), BlockFieldInfo::BlockAddress);
-    BlockFieldInfo sizeInfo(&registeredBlocks.back(), BlockFieldInfo::BlockSize);
-    BlockFieldInfo allocatedInfo(&registeredBlocks.back(), BlockFieldInfo::BlockAllocated);
-    BlockFieldInfo aliveInfo(&registeredBlocks.back(), BlockFieldInfo::BlockAlive);
+    BlockFieldInfo addrInfo(toRegister, BlockFieldInfo::BlockAddress);
+    BlockFieldInfo sizeInfo(toRegister, BlockFieldInfo::BlockSize);
+    BlockFieldInfo allocatedInfo(toRegister, BlockFieldInfo::BlockAllocated);
+    BlockFieldInfo aliveInfo(toRegister, BlockFieldInfo::BlockAlive);
 
     unsigned id;
 
-    if (!toRegister.addrValue) {
-      id = register_expr(toRegister.addrExpr);
+    if (!toRegister->addrValue) {
+      id = register_expr(toRegister->addrExpr);
       idToField.emplace(std::make_pair(id, addrInfo));
     }
-    if (!toRegister.sizeValue) {
-      id = register_expr(toRegister.sizeExpr);
+    if (!toRegister->sizeValue) {
+      id = register_expr(toRegister->sizeExpr);
       idToField.emplace(std::make_pair(id, sizeInfo));
     }
-    if (!toRegister.allocatedValue) {
-      id = register_expr(toRegister.allocatedExpr);
+    if (!toRegister->allocatedValue) {
+      id = register_expr(toRegister->allocatedExpr);
       idToField.emplace(std::make_pair(id, allocatedInfo));
     }
-    if (!toRegister.aliveValue) {
-      id = register_expr(toRegister.aliveExpr);
+    if (!toRegister->aliveValue) {
+      id = register_expr(toRegister->aliveExpr);
       idToField.emplace(std::make_pair(id, aliveInfo));
     }
 
-    if (toRegister.isValid()) {
-      Interval interval(*toRegister.addrValue, *toRegister.addrValue + *toRegister.sizeValue);
+    if (toRegister->isValid()) {
+      Interval interval(*toRegister->addrValue, *toRegister->addrValue + *toRegister->sizeValue);
       if (interval.isPositive()) {
-        auto& intervals = toRegister.local ? localIntervals : globalIntervals;
-        auto& intervalValues = toRegister.local ? localIntervalValues : globalIntervalValues;
+        auto& intervals = toRegister->local ? localIntervals : globalIntervals;
+        auto& intervalValues = toRegister->local ? localIntervalValues : globalIntervalValues;
 
-        interval.bid = toRegister.bid;
+        interval.bid = toRegister->bid;
         bool intersects = intervals.addOrIntersect(interval, nullptr);
         assert(!intersects);
         intervalValues.push_back(interval);
       }
     }
-
-    bidToData[toRegister.bid] = &registeredBlocks.back();
 }
 
 void MemoryAxiomPropagator::registerLocalBlocks() {
@@ -1669,7 +1672,7 @@ void MemoryAxiomPropagator::registerLocalBlocks() {
   fflush(stdout);
 
   for (const auto& data : src_memory.local_blks_to_register)
-    registerBlock(data);
+    registerBlock(new Memory::BlockData(data));
 }
 
 void MemoryAxiomPropagator::registerGlobalBlocks() {
@@ -1691,9 +1694,7 @@ void MemoryAxiomPropagator::registerGlobalBlocks() {
       continue;
 
     Pointer ptr(src_memory, bid, false);
-    IR::Memory::BlockData blockData(false, bid,
-                                    ptr.getAddress(), ptr.blockSize(), ptr.blockAlignment());
-    registerBlock(blockData);
+    registerBlock(new Memory::BlockData(false, bid, ptr.getAddress(), ptr.blockSize(), ptr.blockAlignment()));
   }
 }
 
@@ -1712,8 +1713,7 @@ void MemoryAxiomPropagator::pop(unsigned int num_scopes) {
     localIntervalCnt.pop();
     globalIntervalCnt.pop();
     for (auto j = fixedValues.size(); j > previousFixedCnt; j--) {
-      auto& toRemove = fixedValues[j - 1];
-      toRemove.remove();
+      fixedValues[j - 1].remove();
     }
     for (auto j = localIntervalValues.size(); j > previousLocalIntervalCnt; j--) {
       localIntervals.erase(localIntervalValues[j - 1]);
@@ -1742,7 +1742,7 @@ void MemoryAxiomPropagator::fixed(unsigned int i, const expr &expr) {
   fixedValues.push_back(fieldInfo);
 
   if (fieldInfo.block->isValid()) {
-    IR::Memory::BlockData* d1 = fieldInfo.block;
+    Memory::BlockData* d1 = fieldInfo.block;
     Interval add(*d1->addrValue, *d1->addrValue + *d1->sizeValue);
     if (Pointer::hasLocalBit()
         ? add.end.extract(bits_ptr_address - 1) == 0
@@ -1754,8 +1754,8 @@ void MemoryAxiomPropagator::fixed(unsigned int i, const expr &expr) {
       auto& intervalValues = fieldInfo.block->local ? localIntervalValues : globalIntervalValues;
       // Check for block collisions
       if (intervals.addOrIntersect(add, &collision)) {
-        IR::Memory::BlockData* d2 = bidToData[collision.bid];
-        smt::expr disjoint = IR::disjointBlocks(
+        Memory::BlockData* d2 = bidToData[collision.bid];
+        smt::expr disjoint = disjointBlocks(
                 d1->addrExpr, d1->sizeExpr.zextOrTrunc(bits_ptr_address), d1->alignExpr,
                 d2->addrExpr, d2->sizeExpr.zextOrTrunc(bits_ptr_address), d2->alignExpr);
         printf("Interval intersection: %s vs %s\n\n", add.toString().c_str(), collision.toString().c_str());

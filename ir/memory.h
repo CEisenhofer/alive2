@@ -147,8 +147,8 @@ public:
     smt::expr alignExpr;
     smt::expr allocatedExpr;
     smt::expr aliveExpr;
-    std::optional<util::BigNum> addrValue;
-    std::optional<util::BigNum> sizeValue;
+    util::BigNum* addrValue;
+    util::BigNum* sizeValue;
     // value of aligned is currently not required
     std::optional<bool> allocatedValue;
     std::optional<bool> aliveValue;
@@ -161,7 +161,9 @@ public:
     BlockData(bool local, uint64_t bid, const smt::expr &addr, const smt::expr &size, const smt::expr &align,
               const smt::expr &allocated, const smt::expr &alive);
 
-    BlockData(const BlockData &) = default;
+    BlockData(const BlockData &);
+
+    virtual ~BlockData();
 
     bool addAddr(const smt::expr& e);
     bool addSize(const smt::expr& e);

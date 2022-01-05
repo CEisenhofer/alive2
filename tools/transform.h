@@ -130,7 +130,7 @@ struct BlockFieldInfo {
   IR::Memory::BlockData* block;
   BlockFieldInfoEnum field;
 
-  BlockFieldInfo(IR::Memory::BlockData *block, BlockFieldInfoEnum field): block(block), field(field) {}
+  BlockFieldInfo(IR::Memory::BlockData* block, BlockFieldInfoEnum field): block(block), field(field) {}
   BlockFieldInfo(const BlockFieldInfo& other) = default;
   BlockFieldInfo() = default;
 
@@ -147,7 +147,7 @@ class MemoryAxiomPropagator : public smt::Solver, smt::PropagatorBase {
 
   const IR::Memory &src_memory, &tgt_memory;
 
-  std::vector<IR::Memory::BlockData> registeredBlocks; // BlockFieldInfo point to these elements (==> these pointers are valid)
+  std::vector<IR::Memory::BlockData*> registeredBlocks; // BlockFieldInfo and bidToData contain these pointers (==> these pointers are valid)
 
   std::unordered_map<unsigned, BlockFieldInfo> idToField; // Maps Z3 propagator id -> block information field
   std::unordered_map<unsigned, IR::Memory::BlockData*> bidToData; // Maps bid to the z3 expressions and (partial) model
@@ -164,7 +164,8 @@ class MemoryAxiomPropagator : public smt::Solver, smt::PropagatorBase {
   IntervalTree globalIntervals;
   IntervalTree localIntervals;
 
-  void registerBlock(const IR::Memory::BlockData& toRegister);
+  // memory allocated by new -> deleted by destructor
+  void registerBlock(IR::Memory::BlockData* toRegister);
   void registerLocalBlocks();
   void registerGlobalBlocks();
 
