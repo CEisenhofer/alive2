@@ -312,10 +312,10 @@ public:
   // we don't expose SMT expr types, so range must be passed as a dummy value
   // of the desired type
   static expr mkUF(const char *name, const std::vector<expr> &args,
-                   const expr &range);
+                   const expr &range, bool register_propagator = false);
   static expr mkUF(const std::string &name, const std::vector<expr> &args,
-                   const expr &range) {
-    return mkUF(name.data(), args, range);
+                   const expr &range, bool register_propagator = false) {
+    return mkUF(name.data(), args, range, register_propagator);
   }
 
   static expr mkArray(const char *name, const expr &domain, const expr &range);
@@ -348,6 +348,7 @@ public:
   void printHexadecimal(std::ostream &os) const;
   std::string numeral_string() const;
   std::string fn_name() const; // empty if not a function
+  unsigned getFnArgCnt() const;
   expr getFnArg(unsigned i) const;
   friend std::ostream &operator<<(std::ostream &os, const expr &e);
 

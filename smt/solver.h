@@ -117,6 +117,9 @@ public:
   expr assertions() const;
 
   Result check() const;
+  Result check(std::vector<smt::expr> assumptions) const;
+
+  std::string toString() const;
 
   friend class SolverPush;
   friend class PropagatorBase;
@@ -137,11 +140,11 @@ class PropagatorBase {
 
   typedef std::function<void(unsigned, expr const &)> fixed_eh_t;
   typedef std::function<void(void)> final_eh_t;
-  typedef std::function<void(unsigned, unsigned)> eq_eh_t;
+  typedef std::function<void(expr const &, unsigned)> created_eh_t;
 
   final_eh_t m_final_eh;
-  eq_eh_t m_eq_eh;
   fixed_eh_t m_fixed_eh;
+  created_eh_t m_created_eh;
   Solver *s;
   Z3_solver_callback cb { nullptr };
 
@@ -168,22 +171,22 @@ class PropagatorBase {
     return static_cast<PropagatorBase *>(p)->fresh(context);
   }
 
-  static void fixed_eh(void *_p, Z3_solver_callback cb, unsigned id,
-                       Z3_ast _value) {
+  static void fixed_eh(void *_p, Z3_solver_callback cb, unsigned id, Z3_ast _value) {
     PropagatorBase *p = static_cast<PropagatorBase *>(_p);
     scoped_cb _cb(p, cb);
     expr value(_value);
     static_cast<PropagatorBase *>(p)->m_fixed_eh(id, value);
   }
 
-  static void eq_eh(void *p, Z3_solver_callback cb, unsigned x, unsigned y) {
-    scoped_cb _cb(p, cb);
-    static_cast<PropagatorBase *>(p)->m_eq_eh(x, y);
-  }
-
   static void final_eh(void *p, Z3_solver_callback cb) {
     scoped_cb _cb(p, cb);
     static_cast<PropagatorBase *>(p)->m_final_eh();
+  }
+
+  static void created_eh(void *p, Z3_solver_callback cb, Z3_ast _value, unsigned id) {
+    scoped_cb _cb(p, cb);
+    expr value(_value);
+    static_cast<PropagatorBase *>(p)->m_created_eh(value, id);
   }
 
 public:
@@ -198,15 +201,15 @@ public:
 
   void register_fixed();
 
-  void register_eq();
-
   void register_final();
+
+  void register_created();
 
   virtual void fixed(unsigned, expr const &) {}
 
-  virtual void eq(unsigned, unsigned) {}
-
   virtual void final() {}
+
+  virtual void created(expr const &, unsigned) {}
 
   unsigned register_expr(expr const &e);
 

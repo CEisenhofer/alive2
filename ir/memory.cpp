@@ -10,6 +10,7 @@
 #include <array>
 #include <numeric>
 #include <string>
+#include <smt/ctx.h>
 
 using namespace IR;
 using namespace smt;
@@ -691,23 +692,38 @@ static bool setBool(std::optional<bool>& opt, const smt::expr& e) {
   return false;
 }
 
-Memory::BlockData::BlockData(bool local, uint64_t bid, const expr & addr, const expr & size, const expr & align, const expr & allocated, const expr & alive)
-            : local(local), bid(bid), addrExpr(addr), sizeExpr(size), alignExpr(align), allocatedExpr(allocated), aliveExpr(alive),
+Memory::BlockData::BlockData(bool local, uint64_t id, unsigned dimension, const expr & addr, const expr & size, const expr & align, const expr & allocated, const expr & alive, const expr & relevant)
+            : local(local), id(id), dimension(dimension), addrExpr(addr), sizeExpr(size), alignExpr(align), allocatedExpr(allocated), aliveExpr(alive), relevantExpr(relevant),
             addrValue(nullptr), sizeValue(nullptr), allocatedValue(nullptr), aliveValue(nullptr) {
   addAddr(addr);
   addSize(size);
   addAllocated(allocated);
   addAlive(alive);
+  addRelevant(relevant);
 }
 
 Memory::BlockData::BlockData(const Memory::BlockData &o)
-          : local(o.local), bid(o.bid), addrExpr(o.addrExpr), sizeExpr(o.sizeExpr),
-          alignExpr(o.alignExpr), allocatedExpr(o.allocatedExpr), aliveExpr(o.aliveExpr),
-          addrValue(nullptr), sizeValue(nullptr), allocatedValue(o.allocatedValue), aliveValue(o.aliveValue) {
+          : local(o.local), id(o.id), dimension(o.dimension), addrExpr(o.addrExpr), sizeExpr(o.sizeExpr),
+          alignExpr(o.alignExpr), allocatedExpr(o.allocatedExpr), aliveExpr(o.aliveExpr), relevantExpr(o.relevantExpr),
+          addrValue(nullptr), sizeValue(nullptr), allocatedValue(o.allocatedValue), aliveValue(o.aliveValue), relevantValue(o.relevantValue),
+          addrId(o.addrId), sizeId(o.sizeId), allocatedId(o.allocatedId), aliveId(o.aliveId), relevantId(o.relevantId) {
+
   if (o.addrValue)
     addrValue = new BigNum(*o.addrValue);
   if (o.sizeValue)
     sizeValue = new BigNum(*o.sizeValue);
+}
+
+Memory::BlockData::BlockData(const Memory::BlockData & o, uint64_t id, unsigned dimension, const smt::expr &addr)
+          : local(o.local), id(id), dimension(dimension), addrExpr(addr), sizeExpr(o.sizeExpr),
+          alignExpr(o.alignExpr), allocatedExpr(o.allocatedExpr), aliveExpr(o.aliveExpr), relevantExpr(o.relevantExpr),
+          addrValue(nullptr), sizeValue(nullptr), allocatedValue(o.allocatedValue), aliveValue(o.aliveValue), relevantValue(o.relevantValue),
+          sizeId(o.sizeId), allocatedId(o.allocatedId), aliveId(o.aliveId), relevantId(o.relevantId) {
+
+  if (o.sizeValue)
+    sizeValue = new BigNum(*o.sizeValue);
+
+  addAddr(addr);
 }
 
 Memory::BlockData::~BlockData() {
@@ -728,14 +744,18 @@ bool Memory::BlockData::addAllocated(const smt::expr& e) {
 bool Memory::BlockData::addAlive(const smt::expr& e) {
   return setBool(aliveValue, e);
 }
+bool Memory::BlockData::addRelevant(const smt::expr& e) {
+  return setBool(relevantValue, e);
+}
 
 std::string Memory::BlockData::toString() const {
-  return "Block: " + std::to_string(bid) +
+  return "Block: " + std::to_string(id) +
     "; addr: " + addrExpr.toString() + (addrValue ? " (" + (*addrValue).toString() + ")" : "" ) +
     "; size: " + sizeExpr.toString() + (sizeValue ? " (" + (*sizeValue).toString() + ")" : "" ) +
     "; align: " + alignExpr.toString() +
-    "; allocated: " + allocatedExpr.toString() + (allocatedValue ? (" ("s + ((*allocatedValue) ? "true" : "false") + ")") : "" ) +
-    "; alive: " + aliveExpr.toString() + (aliveValue ? (" ("s + ((*aliveValue) ? "true" : "false") + ")") : "" );
+    "; allocated: " + allocatedExpr.toString() + (allocatedValue ? (" ("s + ((*allocatedValue) ? "true" : "false") + ")") : "") +
+    "; alive: " + aliveExpr.toString() + (aliveValue ? (" ("s + ((*aliveValue) ? "true" : "false") + ")") : ""),
+    "; relevant: " + relevantExpr.toString() + (relevantValue ? (" ("s + ((*relevantValue) ? "true" : "false") + ")") : "");
 }
 
 static set<Pointer> all_leaf_ptrs(const Memory &m, const expr &ptr) {
@@ -1334,6 +1354,28 @@ pair<expr, expr> Memory::mkUndefInput(const ParamAttrs &attrs) const {
   return { p.release(), move(undef) };
 }
 
+std::string Memory::getLocalDisjProxyName() const {
+  return local_name(state, "localDisj");
+}
+
+smt::expr Memory::getLocalDisjProxyExpr(std::vector<smt::expr> domain) const {
+  return expr::mkUF(getLocalDisjProxyName(), domain, true, true);
+}
+
+smt::expr Memory::getProxy() const {
+  if (local_blks_to_register.size() > 1) {
+    std::vector<smt::expr> domain;
+    for (auto& block : local_blks_to_register) {
+      domain.push_back(block.addrExpr);
+      domain.push_back(block.sizeExpr);
+      domain.push_back(block.allocatedExpr);
+      domain.push_back(block.aliveExpr);
+    }
+    return getLocalDisjProxyExpr(domain);
+  }
+  return true;
+}
+
 expr Memory::PtrInput::operator==(const PtrInput &rhs) const {
   if (byval != rhs.byval || nocapture != rhs.nocapture)
     return false;
@@ -1561,7 +1603,7 @@ void Memory::mkLocalDisjAddrAxioms(const expr &allocated, const expr &short_bid,
   }
 
   Pointer p(*this, short_bid_uint, true);
-  local_blks_to_register.emplace_back(true, short_bid_uint, full_addr, size, align, allocated, p.isBlockAlive());
+  local_blks_to_register.emplace_back(true, short_bid_uint, 0, full_addr, size, align, allocated, p.isBlockAlive(), true);
 
   // addr + size only overflows for one case when obj is aligned
   expr no_ovfl;
@@ -1574,11 +1616,11 @@ void Memory::mkLocalDisjAddrAxioms(const expr &allocated, const expr &short_bid,
   state->addPre(allocated.implies(no_ovfl));
 
   // Disjointness of block's address range with other local blocks
-  state->addPre(
+  /*state->addPre(
     allocated.implies(
       disjoint_local_blocks(*this, full_addr,
                             size.zextOrTrunc(bits_ptr_address),
-                            align, local_blk_addr)));
+                            align, local_blk_addr)));*/
 
   local_blk_addr.add(short_bid, move(blk_addr));
 }
@@ -1696,8 +1738,7 @@ void Memory::free(const expr &ptr, bool unconstrained) {
   if (!isnnull.isTrue()) {
     // A nonlocal block for encoding fn calls' side effects cannot be freed.
     ensure_non_fncallmem(p);
-    store_bv(p, false, local_block_liveness, non_local_block_liveness, false,
-             !isnnull);
+    store_bv(p, false, local_block_liveness, non_local_block_liveness, false, !isnnull);
   }
 }
 

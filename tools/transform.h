@@ -82,7 +82,7 @@ struct Interval {
 
   util::BigNum start;
   util::BigNum end;
-  unsigned bid;
+  unsigned id;
 
   Interval();
 
@@ -116,6 +116,36 @@ public:
   bool addOrIntersect(const Interval &interval, Interval *collision);
 };
 
+struct UFunctionArgInfo;
+
+struct UFunctionInfo {
+
+  unsigned id;
+  std::string name;
+  std::vector<UFunctionArgInfo*> args;
+
+  UFunctionInfo(unsigned id, std::string name, std::vector<UFunctionArgInfo*> args) : id(id), name(name), args(args) {}
+  UFunctionInfo(unsigned id, smt::expr function);
+  UFunctionInfo(const UFunctionInfo& other) = default;
+  UFunctionInfo() = default;
+
+  UFunctionArgInfo* getArg(size_t i) const;
+};
+
+struct UFunctionArgInfo {
+
+  unsigned position;
+  smt::expr expr;
+  UFunctionInfo* function;
+
+  UFunctionArgInfo(unsigned position, smt::expr expr, UFunctionInfo* function) :
+      position(position), expr(expr), function(function) {}
+
+  UFunctionArgInfo(const UFunctionArgInfo& other) = default;
+  UFunctionArgInfo() = default;
+
+};
+
 struct BlockFieldInfo {
 
   enum BlockFieldInfoEnum : unsigned char {
@@ -124,18 +154,22 @@ struct BlockFieldInfo {
     BlockSize = 2,
     BlockAlive = 3,
     BlockAllocated = 4,
+    DisjPredicate = 5,
   };
 
 
-  IR::Memory::BlockData* block;
+  std::vector<IR::Memory::BlockData*> containedBlocks;
   BlockFieldInfoEnum field;
 
-  BlockFieldInfo(IR::Memory::BlockData* block, BlockFieldInfoEnum field): block(block), field(field) {}
+  BlockFieldInfo(BlockFieldInfoEnum field) : field(field) { }
+  BlockFieldInfo(IR::Memory::BlockData* block, BlockFieldInfoEnum field) : field(field) {
+    containedBlocks.push_back(block);
+  }
   BlockFieldInfo(const BlockFieldInfo& other) = default;
   BlockFieldInfo() = default;
 
   bool operator==(const BlockFieldInfo& other) const {
-    return block == other.block && field == other.field;
+    return containedBlocks == other.containedBlocks && field == other.field;
   }
 
   void remove();
@@ -145,24 +179,28 @@ struct BlockFieldInfo {
 
 class MemoryAxiomPropagator : public smt::Solver, smt::PropagatorBase {
 
+  uint64_t next_id = UINT64_MAX;
+  uint64_t next_dimension = 2;
+
   const IR::Memory &src_memory, &tgt_memory;
 
   std::vector<IR::Memory::BlockData*> registeredBlocks; // BlockFieldInfo and bidToData contain these pointers (==> these pointers are valid)
+  std::vector<UFunctionInfo*> registeredFunctions; // UFunctionArgsInfo contain these pointers (==> these pointers are valid)
+  std::vector<UFunctionArgInfo*> registeredFunctionArgs; // UFunctionsInfo contain these pointers (==> these pointers are valid)
 
+  std::unordered_map<unsigned, UFunctionInfo*> idToFunction; // Maps Z3 propagator id -> instantiated function info
+  std::unordered_map<unsigned, UFunctionArgInfo*> idToFunctionArg; // Maps Z3 propagator id -> argument info of an instantiated function
   std::unordered_map<unsigned, BlockFieldInfo> idToField; // Maps Z3 propagator id -> block information field
   std::unordered_map<unsigned, IR::Memory::BlockData*> bidToData; // Maps bid to the z3 expressions and (partial) model
 
   std::vector<BlockFieldInfo> fixedValues; // The fixed values in the order they were assigned
-  std::vector<Interval> globalIntervalValues; // The complete global memory-blocks in the order they were completed
-  std::vector<Interval> localIntervalValues; // The complete local memory-blocks in the order they were completed
+  std::vector<std::pair<unsigned, Interval>> fixedIntervals; // first = dimension; second = The completely assigned memory-blocks in the order they were completed
 
   std::stack<unsigned> fixedCnt; // Number of fixed values per decision level
-  std::stack<unsigned> globalIntervalCnt; // Number of complete global memory-blocks per decision level
-  std::stack<unsigned> localIntervalCnt; // Number of complete local memory-blocks per decision level
+  std::stack<unsigned> fixedIntervalCnt; // Number of complete memory-blocks per decision level
 
-  // The addresses + sizes in the memory (used for block disjointness)
-  IntervalTree globalIntervals;
-  IntervalTree localIntervals;
+  // The addresses + sizes in the memory (used for block disjointness); index = dimension of blocks
+  std::vector<IntervalTree> intervalTrees;
 
   // memory allocated by new -> deleted by destructor
   void registerBlock(IR::Memory::BlockData* toRegister);
@@ -182,6 +220,8 @@ public:
 
   void fixed(unsigned int i, const smt::expr &expr) override;
 
+  void created(const smt::expr &expr, unsigned int i) override;
+
   void final() override;
 
   static smt::Result check_expr(const IR::Memory &src_memory,
@@ -189,7 +229,38 @@ public:
                                 const smt::expr &e) {
     MemoryAxiomPropagator s(src_memory, tgt_memory);
     s.add(e);
-    smt::Result result = s.check();
+
+    smt::Result result;
+    /*if (src_memory.local_blks_to_register.size() > 1) {
+      std::set<smt::expr> bound_set;
+      std::vector<smt::expr> bound_vector;
+      for (size_t i = 0; i < src_memory.local_blks_to_register.size(); i++) {
+        smt::expr var = smt::expr::mkFreshVar("x", src_memory.local_blks_to_register[i].addrExpr);
+        bound_set.insert(var);
+        bound_vector.push_back(var);
+      }
+
+      for (size_t i = 1; i <= 1; i++) {
+        smt::expr premiss = smt::expr::mkFreshVar("premiss", true);
+        smt::expr proxy = src_memory.getLocalDisjProxyExpr(bound_vector);
+        smt::expr definition = true;
+        // TODO: Missing precondition & alive
+        for (size_t j = 0; j < src_memory.local_blks_to_register.size() - 1; j++) {
+          definition = definition && (bound_vector[j] + src_memory.local_blks_to_register[j].sizeExpr <= bound_vector[j + 1]);
+        }
+        s.add(premiss.implies(smt::expr::mkForAll(bound_set, proxy == definition)));
+        std::vector<smt::expr> premisses;
+        premisses.push_back(premiss);
+        result = s.check();
+        if (!result.isSat())
+          break;
+        // As we overapproximated the result may be spurious
+        validateModel(); // check if overapprox
+      }
+    }
+    else {*/
+      result = s.check();
+    //}
 #ifdef NDEBUG
     if (result.isSat()) {
       result.printModel();

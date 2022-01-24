@@ -291,6 +291,11 @@ expr Solver::assertions() const {
 }
 
 Result Solver::check() const {
+  std::vector<smt::expr> assumptions;
+  return check(assumptions);
+}
+
+Result Solver::check(std::vector<smt::expr> assumptions) const {
   if (!valid) {
     ++num_invalid;
     return Result::INVALID;
@@ -329,7 +334,15 @@ Result Solver::check() const {
 
   tactic->check();
 
-  switch (Z3_solver_check(ctx(), s)) {
+  std::vector<Z3_ast> assumptions_ast;
+
+  for (auto&& assumption : assumptions) {
+    if (assumption.isTrue())
+      continue;
+    assumptions_ast.push_back(assumption());
+  }
+
+  switch (Z3_solver_check_assumptions(ctx(), s, assumptions_ast.size(), assumptions_ast.data())) {
   case Z3_L_FALSE:
     ++num_unsats;
     return Result::UNSAT;
@@ -356,6 +369,9 @@ Result check_expr(const expr &e) {
   return s.check();
 }
 
+std::string Solver::toString() const {
+  return { Z3_solver_to_string(ctx(), s) };
+}
 
 SolverPush::SolverPush(Solver &s) : s(s), valid(s.valid), is_unsat(s.is_unsat) {
   Z3_solver_push(ctx(), s.s);
@@ -377,21 +393,24 @@ void PropagatorBase::register_fixed() {
   Z3_solver_propagate_fixed(ctx(), s->s, fixed_eh);
 }
 
-void PropagatorBase::register_eq() {
-  assert(s);
-  m_eq_eh = [this](unsigned x, unsigned y) { eq(x, y); };
-  Z3_solver_propagate_eq(ctx(), s->s, eq_eh);
-}
-
 void PropagatorBase::register_final() {
   assert(s);
   m_final_eh = [this]() { final(); };
   Z3_solver_propagate_final(ctx(), s->s, final_eh);
 }
 
+void PropagatorBase::register_created() {
+  assert(s);
+  m_created_eh = [this](expr const &e, unsigned id) { created(e, id); };
+  Z3_solver_propagate_created(ctx(), s->s, created_eh);
+}
+
 unsigned PropagatorBase::register_expr(const expr &e) {
   assert(s);
-  return Z3_solver_propagate_register(ctx(), s->s, e.ast());
+  if (cb != nullptr)
+    return Z3_solver_propagate_register_cb(ctx(), cb, e.ast());
+  else
+    return Z3_solver_propagate_register(ctx(), s->s, e.ast());
 }
 
 void PropagatorBase::conflict(unsigned int num_fixed,

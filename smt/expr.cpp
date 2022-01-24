@@ -1774,7 +1774,7 @@ expr expr::uint2fp(const expr &type) const {
                         *this);
 }
 
-expr expr::mkUF(const char *name, const vector<expr> &args, const expr &range) {
+expr expr::mkUF(const char *name, const vector<expr> &args, const expr &range, bool register_propagator) {
   C2(range);
   auto num_args = args.size();
   vector<Z3_ast> z3_args;
@@ -1788,7 +1788,10 @@ expr expr::mkUF(const char *name, const vector<expr> &args, const expr &range) {
     z3_sorts.emplace_back(arg.sort());
   }
 
-  auto decl = Z3_mk_func_decl(ctx(), Z3_mk_string_symbol(ctx(), name),
+  auto decl = register_propagator
+          ? Z3_solver_propagate_declare(ctx(), Z3_mk_string_symbol(ctx(), name),
+                                        num_args, z3_sorts.data(), range.sort())
+          : Z3_mk_func_decl(ctx(), Z3_mk_string_symbol(ctx(), name),
                               num_args, z3_sorts.data(), range.sort());
   return Z3_mk_app(ctx(), decl, num_args, z3_args.data());
 }
@@ -2068,6 +2071,11 @@ string expr::fn_name() const {
   if (isApp())
     return Z3_get_symbol_string(ctx(), Z3_get_decl_name(ctx(), decl()));
   return "";
+}
+
+unsigned expr::getFnArgCnt() const {
+  auto app = isApp();
+  return Z3_get_app_num_args(ctx(), app);
 }
 
 expr expr::getFnArg(unsigned i) const {
