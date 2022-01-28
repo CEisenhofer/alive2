@@ -1601,7 +1601,7 @@ void BlockFieldInfo::remove() {
         block->aliveValue.reset();
         return;
       case DisjPredicate:
-        block->relevantValue.reset();
+        block->predValue.reset();
         return;
       default:
         assert(false);
@@ -1630,7 +1630,7 @@ void BlockFieldInfo::add(const expr &expr) {
         assert(succ);
         return;
       case DisjPredicate:
-        succ = block->addRelevant(expr);
+        succ = block->addPred(expr);
         assert(succ);
         return;
       default:
@@ -1644,6 +1644,7 @@ MemoryAxiomPropagator::MemoryAxiomPropagator(const Memory &src, const Memory &tg
           src_memory(src), tgt_memory(tgt) {
   register_fixed();
   register_final();
+  register_created();
 
   registerLocalBlocks(); // dimension = 0
   registerGlobalBlocks(); // dimension = 1
@@ -1806,7 +1807,9 @@ void MemoryAxiomPropagator::fixed(unsigned int i, const expr &expr) {
                   );
           printf("Interval intersection: %s vs %s\n\n", add.toString().c_str(), collision.toString().c_str());
           fflush(stdout);
-          this->propagate(0, nullptr, disjoint);
+
+          this->propagate(0, nullptr, block1->predExpr.implies(disjoint));
+
         } else {
           printf("Added interval: %s\n\n", add.toString().c_str());
           fflush(stdout);
@@ -1837,14 +1840,14 @@ void MemoryAxiomPropagator::created(const smt::expr &expr, unsigned int id) {
   for (auto& arg : function->args) {
     uint64_t block_id = next_id--;
     registeredFunctionArgs.push_back(arg);
-    IR::Memory::BlockData* block = new IR::Memory::BlockData(src_memory.local_blks_to_register[i], block_id, dimension, arg);
+    IR::Memory::BlockData* block = new IR::Memory::BlockData(src_memory.local_blks_to_register[i], block_id, dimension, arg->expr);
     registeredBlocks.push_back(block);
 
     if (!block->addrValue) {
       BlockFieldInfo addrInfo(block, BlockFieldInfo::BlockAddress);
-      unsigned id = register_expr(block->addrExpr);
-      block->addrId = id;
-      idToField.emplace(std::make_pair(id, addrInfo));
+      unsigned adddr_id = register_expr(block->addrExpr);
+      block->addrId = adddr_id;
+      idToField.emplace(std::make_pair(adddr_id, addrInfo));
     }
 
     if (block->sizeId != UINT_MAX) {
@@ -1856,8 +1859,9 @@ void MemoryAxiomPropagator::created(const smt::expr &expr, unsigned int id) {
     if (block->aliveId != UINT_MAX) {
       idToField[block->aliveId].containedBlocks.push_back(block);
     }
-    block->addRelevant(expr);
-
+    block->addPred(expr);
+    idToField[id].containedBlocks.push_back(block);
+    block->predId = id;
     i++;
   }
 

@@ -151,7 +151,7 @@ public:
     smt::expr alignExpr;
     smt::expr allocatedExpr;
     smt::expr aliveExpr;
-    smt::expr relevantExpr;
+    smt::expr predExpr;
 
     // Concrete values of the fields (if known)
     util::BigNum* addrValue;
@@ -159,14 +159,14 @@ public:
     // value of aligned is currently not required
     std::optional<bool> allocatedValue;
     std::optional<bool> aliveValue;
-    std::optional<bool> relevantValue;
+    std::optional<bool> predValue;
 
     // The [z3] id of the corresponding field entry (if known)
     size_t addrId = UINT_MAX;
     size_t sizeId = UINT_MAX;
     size_t allocatedId = UINT_MAX;
     size_t aliveId = UINT_MAX;
-    size_t relevantId = UINT_MAX;
+    size_t predId = UINT_MAX;
 
     BlockData() : id(UINT32_MAX), dimension(0) {}
 
@@ -174,7 +174,7 @@ public:
             : BlockData(local, id, dimension, addr, size, align, true, true, true) {}
 
     BlockData(bool local, uint64_t id, unsigned dimension, const smt::expr &addr, const smt::expr &size, const smt::expr &align,
-              const smt::expr &allocated, const smt::expr &alive, const smt::expr &relevant);
+              const smt::expr &allocated, const smt::expr &alive, const smt::expr &predId);
 
     BlockData(const BlockData &);
 
@@ -186,10 +186,14 @@ public:
     bool addSize(const smt::expr& e);
     bool addAllocated(const smt::expr& e);
     bool addAlive(const smt::expr& e);
-    bool addRelevant(const smt::expr& e);
+    bool addPred(const smt::expr& e);
 
     bool isValid() const {
-      return addrValue && sizeValue && allocatedValue && *allocatedValue && aliveValue && *aliveValue && *relevantValue;
+      return addrValue && sizeValue && allocatedValue && *allocatedValue && aliveValue && *aliveValue && *predValue;
+    }
+
+    bool hasFunction() {
+      return dimension <= 1; // all other blocks should be represented by the disjointness function
     }
 
     auto operator<=>(const BlockData &rhs) const = default;

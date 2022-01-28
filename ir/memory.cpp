@@ -692,21 +692,21 @@ static bool setBool(std::optional<bool>& opt, const smt::expr& e) {
   return false;
 }
 
-Memory::BlockData::BlockData(bool local, uint64_t id, unsigned dimension, const expr & addr, const expr & size, const expr & align, const expr & allocated, const expr & alive, const expr & relevant)
-            : local(local), id(id), dimension(dimension), addrExpr(addr), sizeExpr(size), alignExpr(align), allocatedExpr(allocated), aliveExpr(alive), relevantExpr(relevant),
+Memory::BlockData::BlockData(bool local, uint64_t id, unsigned dimension, const expr & addr, const expr & size, const expr & align, const expr & allocated, const expr & alive, const expr & pred)
+            : local(local), id(id), dimension(dimension), addrExpr(addr), sizeExpr(size), alignExpr(align), allocatedExpr(allocated), aliveExpr(alive), predExpr(pred),
             addrValue(nullptr), sizeValue(nullptr), allocatedValue(nullptr), aliveValue(nullptr) {
   addAddr(addr);
   addSize(size);
   addAllocated(allocated);
   addAlive(alive);
-  addRelevant(relevant);
+  addPred(pred);
 }
 
 Memory::BlockData::BlockData(const Memory::BlockData &o)
           : local(o.local), id(o.id), dimension(o.dimension), addrExpr(o.addrExpr), sizeExpr(o.sizeExpr),
-          alignExpr(o.alignExpr), allocatedExpr(o.allocatedExpr), aliveExpr(o.aliveExpr), relevantExpr(o.relevantExpr),
-          addrValue(nullptr), sizeValue(nullptr), allocatedValue(o.allocatedValue), aliveValue(o.aliveValue), relevantValue(o.relevantValue),
-          addrId(o.addrId), sizeId(o.sizeId), allocatedId(o.allocatedId), aliveId(o.aliveId), relevantId(o.relevantId) {
+          alignExpr(o.alignExpr), allocatedExpr(o.allocatedExpr), aliveExpr(o.aliveExpr), predExpr(o.predExpr),
+          addrValue(nullptr), sizeValue(nullptr), allocatedValue(o.allocatedValue), aliveValue(o.aliveValue), predValue(o.predValue),
+          addrId(o.addrId), sizeId(o.sizeId), allocatedId(o.allocatedId), aliveId(o.aliveId), predId(o.predId) {
 
   if (o.addrValue)
     addrValue = new BigNum(*o.addrValue);
@@ -716,9 +716,9 @@ Memory::BlockData::BlockData(const Memory::BlockData &o)
 
 Memory::BlockData::BlockData(const Memory::BlockData & o, uint64_t id, unsigned dimension, const smt::expr &addr)
           : local(o.local), id(id), dimension(dimension), addrExpr(addr), sizeExpr(o.sizeExpr),
-          alignExpr(o.alignExpr), allocatedExpr(o.allocatedExpr), aliveExpr(o.aliveExpr), relevantExpr(o.relevantExpr),
-          addrValue(nullptr), sizeValue(nullptr), allocatedValue(o.allocatedValue), aliveValue(o.aliveValue), relevantValue(o.relevantValue),
-          sizeId(o.sizeId), allocatedId(o.allocatedId), aliveId(o.aliveId), relevantId(o.relevantId) {
+          alignExpr(o.alignExpr), allocatedExpr(o.allocatedExpr), aliveExpr(o.aliveExpr), predExpr(o.predExpr),
+          addrValue(nullptr), sizeValue(nullptr), allocatedValue(o.allocatedValue), aliveValue(o.aliveValue), predValue(o.predValue),
+          sizeId(o.sizeId), allocatedId(o.allocatedId), aliveId(o.aliveId), predId(o.predId) {
 
   if (o.sizeValue)
     sizeValue = new BigNum(*o.sizeValue);
@@ -744,8 +744,8 @@ bool Memory::BlockData::addAllocated(const smt::expr& e) {
 bool Memory::BlockData::addAlive(const smt::expr& e) {
   return setBool(aliveValue, e);
 }
-bool Memory::BlockData::addRelevant(const smt::expr& e) {
-  return setBool(relevantValue, e);
+bool Memory::BlockData::addPred(const smt::expr& e) {
+  return setBool(predValue, e);
 }
 
 std::string Memory::BlockData::toString() const {
@@ -755,7 +755,7 @@ std::string Memory::BlockData::toString() const {
     "; align: " + alignExpr.toString() +
     "; allocated: " + allocatedExpr.toString() + (allocatedValue ? (" ("s + ((*allocatedValue) ? "true" : "false") + ")") : "") +
     "; alive: " + aliveExpr.toString() + (aliveValue ? (" ("s + ((*aliveValue) ? "true" : "false") + ")") : ""),
-    "; relevant: " + relevantExpr.toString() + (relevantValue ? (" ("s + ((*relevantValue) ? "true" : "false") + ")") : "");
+    "; relevant: " + predExpr.toString() + (predValue ? (" ("s + ((*predValue) ? "true" : "false") + ")") : "");
 }
 
 static set<Pointer> all_leaf_ptrs(const Memory &m, const expr &ptr) {
@@ -1367,9 +1367,6 @@ smt::expr Memory::getProxy() const {
     std::vector<smt::expr> domain;
     for (auto& block : local_blks_to_register) {
       domain.push_back(block.addrExpr);
-      domain.push_back(block.sizeExpr);
-      domain.push_back(block.allocatedExpr);
-      domain.push_back(block.aliveExpr);
     }
     return getLocalDisjProxyExpr(domain);
   }
