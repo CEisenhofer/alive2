@@ -68,7 +68,30 @@ ostream& operator<<(ostream &os, const FnAttrs &attr) {
     os << " willreturn";
   if (attr.has(FnAttrs::DereferenceableOrNull))
     os << " dereferenceable_or_null(" << attr.derefOrNullBytes << ')';
+  if (attr.has(FnAttrs::InaccessibleMemOnly))
+    os << " inaccessiblememonly";
   return os;
+}
+
+bool ParamAttrs::refinedBy(const ParamAttrs &other) const {
+  // check attributes that are properties of the caller
+  unsigned attrs =
+    NonNull |
+    Dereferenceable |
+    NoUndef |
+    Align |
+    NoAlias |
+    DereferenceableOrNull
+  ;
+
+  auto other_params = (other.bits & attrs);
+  if ((bits & other_params) != other_params)
+    return false;
+
+  return derefBytes == other.derefBytes &&
+         derefOrNullBytes == other.derefOrNullBytes &&
+         blockSize == other.blockSize &&
+         align == other.align;
 }
 
 bool ParamAttrs::poisonImpliesUB() const {

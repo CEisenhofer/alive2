@@ -646,7 +646,7 @@ public:
         // or objects passed as pointer arguments
         return llvm::isa<llvm::Argument>(V) ||
                llvm::isa<llvm::GlobalVariable>(V) ||
-               llvm::isMallocLikeFn(V, &TLI, false); }))
+               llvm::isAllocLikeFn(V, &TLI); }))
       return LIFETIME_FILLPOISON;
 
     Objs.clear();
@@ -925,13 +925,18 @@ public:
         return error(i);
       }
     }
-    case llvm::Intrinsic::trap:
-    {
+    case llvm::Intrinsic::sideeffect: {
+      FnAttrs attrs;
+      attrs.set(FnAttrs::InaccessibleMemOnly);
+      attrs.set(FnAttrs::WillReturn);
+      attrs.set(FnAttrs::NoThrow);
+      return make_unique<FnCall>(Type::voidTy, "", "#sideeffect", move(attrs));
+    }
+    case llvm::Intrinsic::trap: {
       FnAttrs attrs;
       attrs.set(FnAttrs::NoReturn);
-      attrs.set(FnAttrs::NoWrite);
-      return make_unique<FnCall>(*llvm_type2alive(i.getType()),
-                                 "", "#trap", move(attrs));
+      attrs.set(FnAttrs::NoThrow);
+      return make_unique<FnCall>(Type::voidTy, "", "#trap", move(attrs));
     }
     case llvm::Intrinsic::vastart: {
       PARSE_UNOP();
@@ -1223,6 +1228,10 @@ public:
 
       case llvm::Attribute::ArgMemOnly:
         attrs.set(FnAttrs::ArgMemOnly);
+        break;
+
+      case llvm::Attribute::InaccessibleMemOnly:
+        attrs.set(FnAttrs::InaccessibleMemOnly);
         break;
 
       case llvm::Attribute::NoFree:
