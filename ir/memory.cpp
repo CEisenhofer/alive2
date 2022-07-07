@@ -10,6 +10,7 @@
 #include <array>
 #include <numeric>
 #include <string>
+#include <iostream>
 #include <smt/ctx.h>
 
 using namespace IR;
@@ -686,96 +687,6 @@ weak_ordering Memory::MemBlock::operator<=>(const MemBlock &rhs) const {
   return weak_ordering::equivalent;
 }
 
-static bool setNumber(util::BigNum*& opt, const smt::expr& e, const unsigned bits) {
-  if (!e.isConst())
-    return false;
-  uint64_t i;
-  if (e.isUInt(i)) {
-    opt = new BigNum(i, bits);
-    return true;
-  }
-  opt = new BigNum(e.getBinaryString(), bits);
-  return true;
-}
-
-static bool setBool(std::optional<bool>& opt, const smt::expr& e) {
-  if (e.isTrue()) {
-    opt.emplace(true);
-    return true;
-  }
-  if (e.isFalse()) {
-    opt.emplace(false);
-    return true;
-  }
-  return false;
-}
-
-Memory::BlockData::BlockData(bool local, uint64_t id, unsigned dimension, const expr & addr, const expr & size, const expr & align, const expr & allocated, const expr & alive, const expr & pred)
-            : local(local), id(id), dimension(dimension), addrExpr(addr), sizeExpr(size), alignExpr(align), allocatedExpr(allocated), aliveExpr(alive), predExpr(pred),
-            addrValue(nullptr), sizeValue(nullptr), allocatedValue(nullptr), aliveValue(nullptr) {
-  addAddr(addr);
-  addSize(size);
-  addAllocated(allocated);
-  addAlive(alive);
-  addPred(pred);
-}
-
-Memory::BlockData::BlockData(const Memory::BlockData &o)
-          : local(o.local), id(o.id), dimension(o.dimension), addrExpr(o.addrExpr), sizeExpr(o.sizeExpr),
-          alignExpr(o.alignExpr), allocatedExpr(o.allocatedExpr), aliveExpr(o.aliveExpr), predExpr(o.predExpr),
-          addrValue(nullptr), sizeValue(nullptr), allocatedValue(o.allocatedValue), aliveValue(o.aliveValue), predValue(o.predValue),
-          addrId(o.addrId), sizeId(o.sizeId), allocatedId(o.allocatedId), aliveId(o.aliveId), predId(o.predId) {
-
-  if (o.addrValue)
-    addrValue = new BigNum(*o.addrValue);
-  if (o.sizeValue)
-    sizeValue = new BigNum(*o.sizeValue);
-}
-
-Memory::BlockData::BlockData(const Memory::BlockData & o, uint64_t id, unsigned dimension, const smt::expr &addr)
-          : local(o.local), id(id), dimension(dimension), addrExpr(addr), sizeExpr(o.sizeExpr),
-          alignExpr(o.alignExpr), allocatedExpr(o.allocatedExpr), aliveExpr(o.aliveExpr), predExpr(o.predExpr),
-          addrValue(nullptr), sizeValue(nullptr), allocatedValue(o.allocatedValue), aliveValue(o.aliveValue), predValue(o.predValue),
-          sizeId(o.sizeId), allocatedId(o.allocatedId), aliveId(o.aliveId), predId(o.predId) {
-
-  if (o.sizeValue)
-    sizeValue = new BigNum(*o.sizeValue);
-
-  addAddr(addr);
-}
-
-Memory::BlockData::~BlockData() {
-  delete addrValue;
-  delete sizeValue;
-  addrValue = sizeValue = nullptr;
-}
-
-bool Memory::BlockData::addAddr(const smt::expr& e) {
-  return setNumber(addrValue, e, e.bits());
-}
-bool Memory::BlockData::addSize(const smt::expr& e) {
-  return setNumber(sizeValue, e, bits_ptr_address);
-}
-bool Memory::BlockData::addAllocated(const smt::expr& e) {
-  return setBool(allocatedValue, e);
-}
-bool Memory::BlockData::addAlive(const smt::expr& e) {
-  return setBool(aliveValue, e);
-}
-bool Memory::BlockData::addPred(const smt::expr& e) {
-  return setBool(predValue, e);
-}
-
-std::string Memory::BlockData::toString() const {
-  return "Block: " + std::to_string(id) +
-    "; addr: " + addrExpr.toString() + (addrValue ? " (" + (*addrValue).toString() + ")" : "" ) +
-    "; size: " + sizeExpr.toString() + (sizeValue ? " (" + (*sizeValue).toString() + ")" : "" ) +
-    "; align: " + alignExpr.toString() +
-    "; allocated: " + allocatedExpr.toString() + (allocatedValue ? (" ("s + ((*allocatedValue) ? "true" : "false") + ")") : "") +
-    "; alive: " + aliveExpr.toString() + (aliveValue ? (" ("s + ((*aliveValue) ? "true" : "false") + ")") : ""),
-    "; relevant: " + predExpr.toString() + (predValue ? (" ("s + ((*predValue) ? "true" : "false") + ")") : "");
-}
-
 static set<Pointer> all_leaf_ptrs(const Memory &m, const expr &ptr) {
   set<Pointer> ptrs;
   for (auto &ptr_val : ptr.leafs()) {
@@ -1222,7 +1133,7 @@ bool Memory::noAxiomBid(unsigned bid, const Memory &tgt) const {
   return bid >= tgt.next_nonlocal_bid;
 };
 
-void Memory::mkAxioms(const Memory &tgt) const {
+void Memory::mkAxioms(const Memory &tgt) {
   assert(state->isSource() && !tgt.state->isSource());
   if (memory_unused())
     return;
@@ -1247,6 +1158,23 @@ void Memory::mkAxioms(const Memory &tgt) const {
       continue;
     Pointer q(tgt, bid, false);
     state->addAxiom(q.isHeapAllocated().implies(q.blockAlignment() == align));
+  }
+
+  if (!observesAddresses())
+    return;
+
+  if (has_null_block)
+    state->addAxiom(Pointer::mkNullPointer(*this).getAddress(false) == 0);
+
+  // Non-local blocks are disjoint.
+  // Ignore null pointer block
+  for (unsigned bid = has_null_block; bid < num_nonlocals; ++bid) {
+    if (noAxiomBid(bid, tgt))
+      continue;
+
+    Pointer p(*this, bid, false);
+
+    state->addGlobalBlock(p.getAddress(), p.blockSize(), p.blockAlignment());
   }
 }
 
@@ -1377,25 +1305,6 @@ pair<expr, expr> Memory::mkUndefInput(const ParamAttrs &attrs) const {
   }
   Pointer p(*this, expr::mkUInt(0, bits_for_bid), offset, attrs);
   return { p.release(), move(undef) };
-}
-
-std::string Memory::getLocalDisjProxyName() const {
-  return local_name(state, "localDisj");
-}
-
-smt::expr Memory::getLocalDisjProxyExpr(std::vector<smt::expr> domain) const {
-  return expr::mkUF(getLocalDisjProxyName(), domain, true, true);
-}
-
-smt::expr Memory::getProxy() const {
-  if (local_blks_to_register.size() > 1) {
-    std::vector<smt::expr> domain;
-    for (auto& block : local_blks_to_register) {
-      domain.push_back(block.addrExpr);
-    }
-    return getLocalDisjProxyExpr(domain);
-  }
-  return true;
 }
 
 expr Memory::PtrInput::operator==(const PtrInput &rhs) const {
@@ -1610,20 +1519,21 @@ void Memory::setState(const Memory::CallState &st,
   mkNonlocalValAxioms(true);
 }
 
-static expr disjoint_local_blocks(const Memory &m, const expr &addr,
+expr Memory::disjoint_local_blocks(const Memory &m, const expr &addr,
                                   const expr &sz, const expr &align,
-                                  const FunctionExpr &blk_addr) {
+                                  const expr &allocated, const FunctionExpr &blk_addr) {
   expr disj = true;
-
+  std::vector<State::CollisionCandidate> candidate;
   // Disjointness of block's address range with other local blocks
   auto zero = expr::mkUInt(0, bits_for_offset);
   for (auto &[sbid, addr0] : blk_addr) {
     Pointer p2(m, Pointer::mkLongBid(sbid, true), zero);
-    disj &= p2.isBlockAlive()
-              .implies(disjointBlocks(addr, sz, align, p2.getAddress(),
-                                p2.blockSize().zextOrTrunc(bits_ptr_address),
-                                p2.blockAlignment()));
+    // std::cout << "addr1: " << addr.toString() + "\naddr2: " << p2.getAddress() << std::endl;
+    // std::cout << "alive2: " << p2.isBlockAlive().toString() << std::endl;
+    // std::cout << "++++++++" << std::endl;
+    candidate.emplace_back(p2.getAddress(), p2.blockSize(), p2.isBlockAlive());
   }
+  state->addLocalBlock(addr, sz, align, allocated, candidate);
   return disj;
 }
 
@@ -1652,9 +1562,6 @@ void Memory::mkLocalDisjAddrAxioms(const expr &allocated, const expr &short_bid,
     assert(false);
   }
 
-  Pointer p(*this, short_bid_uint, true);
-  local_blks_to_register.emplace_back(true, short_bid_uint, 0, full_addr, size, align, allocated, p.isBlockAlive(), true);
-
   // addr + size only overflows for one case when obj is aligned
   expr no_ovfl;
   if (size.ule(align.zextOrTrunc(bits_size_t)).isTrue())
@@ -1666,11 +1573,9 @@ void Memory::mkLocalDisjAddrAxioms(const expr &allocated, const expr &short_bid,
   state->addPre(allocated.implies(no_ovfl));
 
   // Disjointness of block's address range with other local blocks
-  /*state->addPre(
-    allocated.implies(
-      disjoint_local_blocks(*this, full_addr,
-                            size.zextOrTrunc(bits_ptr_address),
-                            align, local_blk_addr)));*/
+  disjoint_local_blocks(*this, full_addr,
+                            size, align,
+                            allocated, local_blk_addr);
 
   local_blk_addr.add(short_bid, move(blk_addr));
 }
@@ -1767,10 +1672,9 @@ void Memory::startLifetime(const expr &ptr_local) {
   state->addUB(p.isLocal());
 
   if (observesAddresses())
-    state->addPre(
-      disjoint_local_blocks(*this, p.getAddress(),
-                            p.blockSize().zextOrTrunc(bits_ptr_address),
-                            p.blockAlignment(), local_blk_addr));
+    disjoint_local_blocks(*this, p.getAddress(),
+                            p.blockSize(), p.blockAlignment(),
+                            true, local_blk_addr);
 
   store_bv(p, true, local_block_liveness, non_local_block_liveness, true);
 }
@@ -2262,7 +2166,6 @@ Memory Memory::mkIf(const expr &cond, const Memory &then, const Memory &els) {
   ret.non_local_blk_size.add(els.non_local_blk_size);
   ret.non_local_blk_align.add(els.non_local_blk_align);
   ret.non_local_blk_kind.add(els.non_local_blk_kind);
-  ret.local_blks_to_register.insert(ret.local_blks_to_register.cend(), els.local_blks_to_register.cbegin(), els.local_blks_to_register.cend());
   assert(then.byval_blks == els.byval_blks);
   ret.escaped_local_blks.unionWith(els.escaped_local_blks);
 

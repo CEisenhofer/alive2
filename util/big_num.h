@@ -22,9 +22,9 @@ class BigNum {
 
 public:
 
-  BigNum() : arr(), bitWidth(0) {}
+  BigNum();
 
-  explicit BigNum(size_t bitWidth) : arr(), bitWidth(bitWidth) {}
+  explicit BigNum(size_t bitWidth);
 
   BigNum(uint64_t u64, size_t bitWidth);
 
@@ -40,7 +40,13 @@ public:
     return bitWidth;
   }
 
+  void set(uint64_t u64);
+
+  void set(const char* a);
+
   BigNum operator+(const BigNum &other) const;
+
+  BigNum operator-(const BigNum &other) const;
 
   bool operator==(const BigNum &other) const;
 
@@ -56,7 +62,7 @@ public:
 
   bool extract(size_t pos) const;
 
-  operator bool() const;
+  bool isZero() const;
 
   std::string toString() const;
 

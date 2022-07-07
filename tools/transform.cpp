@@ -1,6 +1,7 @@
 // Copyright (c) 2018-present The Alive2 Authors.
 // Distributed under the MIT license that can be found in the LICENSE file.
 
+#include "tools/lazy_instantiation.h"
 #include "tools/transform.h"
 #include "ir/globals.h"
 #include "ir/state.h"
@@ -22,12 +23,6 @@
 #include <sstream>
 #include <unordered_map>
 #include <cstring>
-
-#ifdef NDEBUG
-
-#include <z3.h>
-
-#endif
 
 using namespace IR;
 using namespace smt;
@@ -395,14 +390,16 @@ static expr encode_undef_refinement(const Type &type, const State::ValTy &a,
 }
 
 static void check_refinement(Errors &errs, const Transform &t,
-                             const State &src_state, const State &tgt_state,
+                             State &src_state, State &tgt_state,
                              const Value *var, const Type &type,
                              const expr &fndom_a, const State::ValTy &ap,
                              const expr &fndom_b, const State::ValTy &bp,
                              bool check_each_var) {
 
+  std::unordered_map<std::string, std::vector<IR::State::MemoryBlockExpressions>*> userFunctionsToInfo;
+
   if (MemoryAxiomPropagator::check_expr(
-          src_state.getMemory(), tgt_state.getMemory(), !src_state.sinkDomain())
+          src_state.getMemory(), tgt_state.getMemory(), !src_state.sinkDomain(), userFunctionsToInfo)
           .isUnsat()) {
     errs.add("The source program doesn't reach a return instruction.\n"
              "Consider increasing the unroll factor if it has loops",
@@ -412,7 +409,7 @@ static void check_refinement(Errors &errs, const Transform &t,
 
   auto sink_tgt = tgt_state.sinkDomain();
   if (MemoryAxiomPropagator::check_expr(src_state.getMemory(),
-                                        tgt_state.getMemory(), !sink_tgt)
+                                        tgt_state.getMemory(), !sink_tgt, userFunctionsToInfo)
           .isUnsat()) {
     errs.add("The target program doesn't reach a return instruction.\n"
              "Consider increasing the unroll factor if it has loops",
@@ -433,6 +430,7 @@ static void check_refinement(Errors &errs, const Transform &t,
 
   AndExpr axioms = src_state.getAxioms();
   axioms.add(tgt_state.getAxioms());
+  axioms.add(src_state.getGlobalProxy(userFunctionsToInfo));
 
   // note that precondition->toSMT() may add stuff to getPre,
   // so order here matters
@@ -452,15 +450,15 @@ static void check_refinement(Errors &errs, const Transform &t,
 
   if (MemoryAxiomPropagator::check_expr(src_state.getMemory(),
                                         tgt_state.getMemory(),
-                                        axioms_expr && (pre_src && pre_tgt))
+                                        axioms_expr && (pre_src && pre_tgt), userFunctionsToInfo)
           .isUnsat()) {
     errs.add("Precondition is always false", false);
     return;
   }
 
   // Add proxy for lazy instantiation via propagator into the scope of quantifiers
-  expr proxy_src = src_state.getMemory().getProxy();
-  expr proxy_tgt = tgt_state.getMemory().getProxy();
+  expr proxy_src = src_state.getLocalProxy(userFunctionsToInfo);
+  expr proxy_tgt = tgt_state.getLocalProxy(userFunctionsToInfo);
   pre_src = pre_src && proxy_src;
   pre_tgt = pre_tgt && proxy_tgt;
 
@@ -498,10 +496,8 @@ static void check_refinement(Errors &errs, const Transform &t,
 
   auto check = [&](expr &&e, auto &&printer, const char *msg) {
     e = mk_fml(move(e));
-    /*printf("Problem: \n%s\n\n", e.toString().c_str());
-    fflush(stdout);*/
     auto res = MemoryAxiomPropagator::check_expr(src_state.getMemory(),
-                                                 tgt_state.getMemory(), e);
+                                                 tgt_state.getMemory(), e, userFunctionsToInfo);
     if (!res.isUnsat() && !error(errs, src_state, tgt_state, res, var, msg,
                                  check_each_var, printer))
       return false;
@@ -1519,389 +1515,4 @@ ostream& operator<<(ostream &os, const Transform &t) {
   return os;
 }
 
-#ifdef _DEBUG
-#define printf(...)
-#define fflush(X)
-#endif
-
-Interval::Interval()
-        : start(bits_ptr_address), end(bits_ptr_address) {}
-
-Interval::Interval(const BigNum &start, const BigNum &end) : start(start), end(end) {}
-
-bool Interval::intersect(const Interval &o) const {
-  expr expr = start >= o.end || o.start >= end;
-  assert(expr.isBool());
-  return expr.isFalse();
-}
-
-bool Interval::isPositive() const {
-  expr expr = start < end;
-  assert(expr.isBool());
-  return expr.isTrue();
-}
-
-bool Interval::isNegative() const {
-  expr expr = end < start;
-  assert(expr.isBool());
-  return expr.isTrue();
-}
-
-bool operator<(const Interval &o1, const Interval &o2) {
-  if (o1.start < o2.start) {
-    return true;
-  }
-  if (o1.start != o2.start) {
-    return false;
-  }
-  if (o1.end > o2.end) {
-    return true;
-  }
-  if (o1.end != o2.end) {
-    return false;
-  }
-  return o1.id < o2.id;
-}
-
-bool operator==(const Interval &o1, const Interval &o2) {
-  return o1.start == o2.start && o1.end == o2.end && o1.id == o2.id;
-}
-
-bool IntervalTree::addOrIntersect(const Interval &interval, Interval *collision) {
-  if (interval.isNegative()) {
-    return false;
-  }
-  if (this->empty()) {
-    this->insert(interval);
-    return false;
-  }
-
-  auto bound = this->upper_bound(interval);
-  if (bound != this->end() && bound->intersect(interval)) {
-    if (collision != nullptr) {
-      *collision = *bound;
-    }
-    return true;
-  }
-  // consider the interval directly below. Skip all 0-intervals that might come before the relevant one
-  while (bound != this->begin()) {
-    bound--;
-    if (bound->intersect(interval)) {
-      if (collision != nullptr) {
-        *collision = *bound;
-      }
-      return true;
-    }
-    if (bound->start != bound->end) {
-      break;
-    }
-  }
-  this->insert(bound, interval);
-  return false;
-}
-
-UFunctionInfo::UFunctionInfo(unsigned id, smt::expr function) : id(id), name(function.fn_name()) {
-  unsigned cnt = function.getFnArgCnt();
-  for (size_t i = 0; i < cnt; i++) {
-    smt::expr arg = function.getFnArg(i);
-    UFunctionArgInfo* argument = new UFunctionArgInfo(i, arg, this);
-    args.push_back(argument);
-  }
-}
-
-UFunctionArgInfo* UFunctionInfo::getArg(size_t i) const {
-  assert(args[i]->position == i);
-  return args[i];
-}
-
-void BlockFieldInfo::remove() {
-  for (auto& block : containedBlocks) {
-    switch (field) {
-      case BlockAddress:
-        delete block->addrValue;
-        block->addrValue = nullptr;
-        return;
-      case BlockSize:
-        delete block->sizeValue;
-        block->sizeValue = nullptr;
-        return;
-      case BlockAllocated:
-        block->allocatedValue.reset();
-        return;
-      case BlockAlive:
-        block->aliveValue.reset();
-        return;
-      case DisjPredicate:
-        block->predValue.reset();
-        return;
-      default:
-        assert(false);
-    }
-  }
-}
-
-void BlockFieldInfo::add(const expr &expr) {
-  for (auto& block : containedBlocks) {
-    bool succ;
-    switch (field) {
-      case BlockAddress:
-        succ = block->addAddr(expr);
-        assert(succ);
-        return;
-      case BlockSize:
-        succ = block->addSize(expr);
-        assert(succ);
-        return;
-      case BlockAllocated:
-        succ = block->addAllocated(expr);
-        assert(succ);
-        return;
-      case BlockAlive:
-        succ = block->addAlive(expr);
-        assert(succ);
-        return;
-      case DisjPredicate:
-        succ = block->addPred(expr);
-        assert(succ);
-        return;
-      default:
-        assert(false);
-    }
-  }
-}
-
-MemoryAxiomPropagator::MemoryAxiomPropagator(const Memory &src, const Memory &tgt)
-        : Solver(false), PropagatorBase(this),
-          src_memory(src), tgt_memory(tgt) {
-  register_fixed();
-  register_final();
-  register_created();
-
-  registerLocalBlocks(); // dimension = 0
-  registerGlobalBlocks(); // dimension = 1
-}
-
-MemoryAxiomPropagator::~MemoryAxiomPropagator() {
-  for (auto& ptr : registeredBlocks)
-    delete ptr;
-  for (auto& ptr : registeredFunctions)
-    delete ptr;
-  for (auto& ptr : registeredFunctionArgs)
-    delete ptr;
-}
-
-void MemoryAxiomPropagator::registerBlock(Memory::BlockData* toRegister) {
-
-  registeredBlocks.push_back(toRegister);
-  bidToData[toRegister->id] = toRegister;
-
-  BlockFieldInfo addrInfo(toRegister, BlockFieldInfo::BlockAddress);
-  BlockFieldInfo sizeInfo(toRegister, BlockFieldInfo::BlockSize);
-  BlockFieldInfo allocatedInfo(toRegister, BlockFieldInfo::BlockAllocated);
-  BlockFieldInfo aliveInfo(toRegister, BlockFieldInfo::BlockAlive);
-
-  unsigned id;
-
-  if (!toRegister->addrValue) {
-    id = register_expr(toRegister->addrExpr);
-    toRegister->addrId = id;
-    idToField.emplace(std::make_pair(id, addrInfo));
-  }
-  if (!toRegister->sizeValue) {
-    id = register_expr(toRegister->sizeExpr);
-    toRegister->sizeId = id;
-    idToField.emplace(std::make_pair(id, sizeInfo));
-  }
-  if (!toRegister->allocatedValue) {
-    id = register_expr(toRegister->allocatedExpr);
-    toRegister->allocatedId = id;
-    idToField.emplace(std::make_pair(id, allocatedInfo));
-  }
-  if (!toRegister->aliveValue) {
-    id = register_expr(toRegister->aliveExpr);
-    toRegister->aliveId = id;
-    idToField.emplace(std::make_pair(id, aliveInfo));
-  }
-
-  if (toRegister->isValid()) {
-    Interval interval(*toRegister->addrValue, *toRegister->addrValue + *toRegister->sizeValue);
-    assert(interval.isPositive());
-    interval.id = toRegister->id;
-    bool intersects = intervalTrees[toRegister->dimension].addOrIntersect(interval, nullptr);
-    assert(!intersects);
-    fixedIntervals.push_back(std::make_pair(toRegister->dimension, interval));
-  }
-}
-
-void MemoryAxiomPropagator::registerLocalBlocks() {
-  printf("\nRegistering locals!\n\n");
-  fflush(stdout);
-
-  intervalTrees.emplace_back();
-
-  for (const auto& data : src_memory.local_blks_to_register)
-    registerBlock(new Memory::BlockData(data));
-}
-
-void MemoryAxiomPropagator::registerGlobalBlocks() {
-
-  printf("\nRegistering globals!\n\n");
-  fflush(stdout);
-
-  intervalTrees.emplace_back();
-
-  if (num_locals_src == 0 && num_locals_tgt == 0 && num_nonlocals == 0)
-    return;
-
-  if (!observes_addresses)
-    return;
-
-  if (has_null_block)
-    add(Pointer::mkNullPointer(src_memory).getAddress(false) == 0);
-
-  for (unsigned bid = has_null_block; bid < num_nonlocals; ++bid) {
-    if (src_memory.noAxiomBid(bid, tgt_memory))
-      continue;
-
-    Pointer ptr(src_memory, bid, false);
-    registerBlock(new Memory::BlockData(false, bid, 1, ptr.getAddress(), ptr.blockSize(), ptr.blockAlignment()));
-  }
-}
-
-void MemoryAxiomPropagator::push() {
-  fixedCnt.push((unsigned)fixedValues.size());
-  fixedIntervalCnt.push((unsigned)fixedIntervals.size());
-}
-
-void MemoryAxiomPropagator::pop(unsigned int num_scopes) {
-  for (unsigned i = 0; i < num_scopes; i++) {
-    unsigned previousFixedCnt = fixedCnt.top();
-    unsigned previousIntervalCnt = fixedIntervalCnt.top();
-    fixedCnt.pop();
-    fixedIntervalCnt.pop();
-    for (auto j = fixedValues.size(); j > previousFixedCnt; j--) {
-      fixedValues[j - 1].remove();
-    }
-    for (auto j = fixedIntervals.size(); j > previousIntervalCnt; j--) {
-      auto value = fixedIntervals[j - 1];
-      intervalTrees[value.first].erase(value.second);
-    }
-    
-    fixedValues.resize(previousFixedCnt);
-    fixedIntervals.resize(previousIntervalCnt);
-  }
-}
-
-void MemoryAxiomPropagator::fixed(unsigned int i, const expr &expr) {
-
-  BlockFieldInfo fieldInfo = idToField.at(i);
-
-  // Ordinary addresses may not be zero
-  if (fieldInfo.field == BlockFieldInfo::BlockFieldInfoEnum::BlockAddress && expr.isZero()) {
-    this->conflict(1, &i);
-    return;
-  }
-
-  fieldInfo.add(expr);
-  fixedValues.push_back(fieldInfo);
-
-  for (auto& block1 : fieldInfo.containedBlocks) {
-    if (block1->isValid()) {
-      Interval add(*block1->addrValue, *block1->addrValue + *block1->sizeValue);
-
-      if (!block1->local && Pointer::hasLocalBit()
-          ? add.end.extract(bits_ptr_address - 1) != 0
-          : !(add.end >= *block1->addrValue && add.end >= *block1->sizeValue)) {
-
-        // global memory overflows
-        auto truncatedSize = block1->sizeExpr.zextOrTrunc(bits_ptr_address);
-        printf("Overflow: %s\n\n", add.toString().c_str());
-        fflush(stdout);
-        this->propagate(0, nullptr,
-                        Pointer::hasLocalBit()
-                        // don't spill to local addr section
-                        ? (block1->addrExpr + truncatedSize).extract(bits_ptr_address - 1, bits_ptr_address - 1) == 0
-                        : block1->addrExpr.add_no_uoverflow(truncatedSize.zextOrTrunc(bits_ptr_address))
-        );
-      } else {
-        add.id = block1->id;
-        Interval collision;
-        // Check for block collisions
-        if (intervalTrees[block1->dimension].addOrIntersect(add, &collision)) {
-          Memory::BlockData* block2 = bidToData[collision.id];
-          smt::expr disjoint =
-                  (block1->allocatedExpr && block2->aliveExpr).implies(
-                    disjointBlocks(
-                      block1->addrExpr, block1->sizeExpr.zextOrTrunc(bits_ptr_address), block1->alignExpr,
-                      block2->addrExpr, block2->sizeExpr.zextOrTrunc(bits_ptr_address), block2->alignExpr
-                      )
-                  );
-          printf("Interval intersection: %s vs %s\n\n", add.toString().c_str(), collision.toString().c_str());
-          fflush(stdout);
-
-          this->propagate(0, nullptr, block1->predExpr.implies(disjoint));
-
-        } else {
-          printf("Added interval: %s\n\n", add.toString().c_str());
-          fflush(stdout);
-          fixedIntervals.push_back(std::make_pair(block1->dimension, add));
-        }
-      }
-    }
-  }
-}
-
-void MemoryAxiomPropagator::created(const smt::expr &expr, unsigned int id) {
-  printf("%s: %d\n", expr.toString().c_str(), id);
-
-  unsigned dimension = next_dimension++;
-
-  BlockFieldInfo info(BlockFieldInfo::BlockFieldInfoEnum::DisjPredicate);
-  idToField.emplace(std::make_pair(id, info));
-
-  UFunctionInfo* function = new UFunctionInfo(id, expr);
-  registeredFunctions.push_back(function);
-  idToFunction[id] = function;
-
-  intervalTrees.emplace_back();
-
-  assert(function->args.size() == src_memory.local_blks_to_register.size());
-
-  int i = 0;
-  for (auto& arg : function->args) {
-    uint64_t block_id = next_id--;
-    registeredFunctionArgs.push_back(arg);
-    IR::Memory::BlockData* block = new IR::Memory::BlockData(src_memory.local_blks_to_register[i], block_id, dimension, arg->expr);
-    registeredBlocks.push_back(block);
-
-    if (!block->addrValue) {
-      BlockFieldInfo addrInfo(block, BlockFieldInfo::BlockAddress);
-      unsigned adddr_id = register_expr(block->addrExpr);
-      block->addrId = adddr_id;
-      idToField.emplace(std::make_pair(adddr_id, addrInfo));
-    }
-
-    if (block->sizeId != UINT_MAX) {
-      idToField[block->sizeId].containedBlocks.push_back(block);
-    }
-    if (block->allocatedId != UINT_MAX) {
-      idToField[block->allocatedId].containedBlocks.push_back(block);
-    }
-    if (block->aliveId != UINT_MAX) {
-      idToField[block->aliveId].containedBlocks.push_back(block);
-    }
-    block->addPred(expr);
-    idToField[id].containedBlocks.push_back(block);
-    block->predId = id;
-    i++;
-  }
-
-}
-
-void MemoryAxiomPropagator::final() {
-}
-
-PropagatorBase *MemoryAxiomPropagator::fresh(Z3_context ctx) {
-  return this;
-}
 }

@@ -11,6 +11,9 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
 set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
+set(CMAKE_INSTALL_RPATH "/files/00-DBAI/home/ceisenhofer/gcc-11-1/lib64")
+set(CMAKE_BUILD_RPATH "/files/00-DBAI/home/ceisenhofer/gcc-11-1/lib64")
+set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 if (MSVC)
   set(CMAKE_CXX_FLAGS                "/GL /EHsc /W2 ${CMAKE_CXX_FLAGS}")
@@ -119,6 +122,7 @@ add_library(smt STATIC ${SMT_SRCS})
 
 set(TOOLS_SRCS
   tools/transform.cpp
+  tools/lazy_instantiation.cpp
 )
 
 add_library(tools STATIC ${TOOLS_SRCS})

@@ -669,6 +669,14 @@ void State::addNoReturn(const expr &cond) {
   addUB(!cond);
 }
 
+void State::addGlobalBlock(const smt::expr &addr, const smt::expr &size, const smt::expr &align) {
+  global_blks_to_register.emplace_back(addr, size, align);
+}
+
+void State::addLocalBlock(const smt::expr &addr, const smt::expr &size, const smt::expr &align, const smt::expr &allocated, std::vector<CollisionCandidate> &alive) {
+  local_blks_to_register.emplace_back(addr, size, align, allocated, std::move(alive));
+}
+
 expr State::FnCallInput::operator==(const FnCallInput &rhs) const {
   if (readsmem != rhs.readsmem ||
       argmemonly != rhs.argmemonly ||
@@ -988,6 +996,51 @@ expr State::rewriteUndef(expr &&val, const set<expr> &undef_vars) {
 
 void State::finishInitializer() {
   is_initialization_phase = false;
+}
+
+smt::expr State::getDisjProxyExpr(const std::string name, std::vector<smt::expr> funcDomain) const {
+  return expr::mkUF(string(name) + (isSource() ? "_src" : "_tgt"), funcDomain, true, true);
+}
+
+smt::expr State::getProxy(const char* name, std::vector<MemoryBlockExpressions>& blocks, std::unordered_map<std::string, std::vector<MemoryBlockExpressions>*>& userFunctionToInfo) const {
+  if (!blocks.empty()) {
+    // global
+    if (!blocks[0].local) {
+      std::vector<smt::expr> funcDomain;
+      for (unsigned i = 0; i < blocks.size(); i++) {
+        funcDomain.push_back(blocks[i].addrExpr);
+        funcDomain.push_back(blocks[i].sizeExpr);
+      }
+      smt::expr func = getDisjProxyExpr(name, funcDomain);
+      userFunctionToInfo[func.fn_name()] = &blocks;
+      return func;
+    }
+    // local
+    std::vector<smt::expr> funcDomain;
+    for (unsigned i = 0; i < blocks.size(); i++) {
+      funcDomain.push_back(blocks[i].addrExpr);
+      funcDomain.push_back(blocks[i].sizeExpr);
+      if (!blocks[i].allocatedExpr.isTrue() && !blocks[i].allocatedExpr.isFalse())
+        funcDomain.push_back(blocks[i].allocatedExpr);
+      for (unsigned j = 0; j < blocks[i].collisionCandidates.size(); j++) {
+        auto& collisionCandidate = blocks[i].collisionCandidates[j];
+        funcDomain.push_back(collisionCandidate.aliveExpr);
+
+        for (unsigned k = 0; k < blocks.size(); k++){
+          if (blocks[k].addrExpr.eq(collisionCandidate.addrExpr) &&
+              blocks[k].sizeExpr.eq(collisionCandidate.sizeExpr)) {
+            collisionCandidate.correspondingIndex = k;
+            break;
+          }
+        }
+        assert(collisionCandidate.correspondingIndex != (unsigned)-1);
+      }
+    }
+    smt::expr func = getDisjProxyExpr(name, funcDomain);
+    userFunctionToInfo[func.fn_name()] = &blocks;
+    return func;
+  }
+  return true;
 }
 
 expr State::sinkDomain() const {

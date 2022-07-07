@@ -8,6 +8,8 @@ typedef struct _Z3_params *Z3_params;
 
 namespace smt {
 
+class PropagatorBase;
+
 typedef enum
 {
   Z3_OK,
@@ -30,6 +32,7 @@ class context {
   Z3_params no_timeout_param;
 
 public:
+
   Z3_context operator()() const { return ctx; }
 
   Z3_params getNoTimeoutParam() const { return no_timeout_param; }
@@ -39,6 +42,8 @@ public:
   void destroy();
 
   smt::Z3_error getErrorCode();
+
+   friend PropagatorBase;
 };
 
 extern context ctx;

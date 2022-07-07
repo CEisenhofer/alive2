@@ -32,122 +32,124 @@ static unsigned num_timeout = 0;
 static unsigned num_errors = 0;
 
 namespace {
-class Tactic {
-protected:
-  Z3_tactic t = nullptr;
-  const char *name = nullptr;
+    class Tactic {
+    protected:
+        Z3_tactic t = nullptr;
+        const char *name = nullptr;
 
-  Tactic(Z3_tactic t) : t(t) {
-    Z3_tactic_inc_ref(ctx(), t);
-  }
-
-  void destroy() {
-    if (t)
-      Z3_tactic_dec_ref(ctx(), t);
-  }
-
-public:
-  Tactic(const char *name) : Tactic(Z3_mk_tactic(ctx(), name)) {
-    this->name = name;
-  }
-
-  Tactic(Tactic &&other) {
-    swap(t, other.t);
-    swap(name, other.name);
-  }
-
-  void operator=(Tactic &&other) {
-    destroy();
-    t = nullptr;
-    name = nullptr;
-    swap(t, other.t);
-    swap(name, other.name);
-  }
-
-  ~Tactic() { destroy(); }
-
-  friend class smt::Solver;
-  friend class MultiTactic;
-};
-
-
-class MultiTactic final : public Tactic {
-  vector<Tactic> tactics;
-  Z3_goal goal = nullptr;
-
-public:
-  MultiTactic(initializer_list<const char*> ts) : Tactic("skip") {
-    if (tactic_verbose) {
-      goal = Z3_mk_goal(ctx(), true, false, false);
-      Z3_goal_inc_ref(ctx(), goal);
-    }
-
-    for (auto I = ts.begin(), E = ts.end(); I != E; ++I) {
-      Tactic t(*I);
-      *this = mkThen(*this, t);
-      if (tactic_verbose)
-        tactics.emplace_back(move(t));
-    }
-  }
-
-  ~MultiTactic() {
-    if (goal)
-      Z3_goal_dec_ref(ctx(), goal);
-  }
-
-  void operator=(Tactic &&other) {
-    static_cast<Tactic&>(*this) = move(other);
-  }
-
-  static Tactic mkThen(const Tactic &a, const Tactic &b) {
-    return Z3_tactic_and_then(ctx(), a.t, b.t);
-  }
-
-  void add(Z3_ast ast) {
-    if (tactic_verbose)
-      Z3_goal_assert(ctx(), goal, ast);
-  }
-
-  void check() {
-    if (!tactic_verbose)
-      return;
-
-    string last_result;
-
-    for (auto &t : tactics) {
-      dbg() << "\nApplying " << t.name << endl;
-
-      Tactic to(Z3_tactic_try_for(ctx(), t.t, 5000));
-      Tactic skip(Z3_tactic_skip(ctx()));
-      to = Tactic(Z3_tactic_or_else(ctx(), to.t, skip.t));
-      auto r = Z3_tactic_apply(ctx(), to.t, goal);
-      Z3_apply_result_inc_ref(ctx(), r);
-      reset_solver();
-
-      for (unsigned i = 0, e = Z3_apply_result_get_num_subgoals(ctx(), r);
-           i != e; ++i) {
-        auto ng = Z3_apply_result_get_subgoal(ctx(), r, i);
-        for (unsigned ii = 0, ee = Z3_goal_size(ctx(), ng); ii != ee; ++ii) {
-          add(Z3_goal_formula(ctx(), ng, ii));
+        Tactic(Z3_tactic t) : t(t) {
+            Z3_tactic_inc_ref(ctx(), t);
         }
-      }
-      Z3_apply_result_dec_ref(ctx(), r);
 
-      string new_r = Z3_goal_to_string(ctx(), goal);
-      if (new_r != last_result) {
-        dbg() << new_r << '\n';
-        last_result = move(new_r);
-      } else {
-        dbg() << "(no change)\n";
-      }
-    }
-  }
+        void destroy() {
+            if (t)
+                Z3_tactic_dec_ref(ctx(), t);
+        }
 
-  void reset_solver() {
-    if (tactic_verbose)
-      Z3_goal_reset(ctx(), goal);
-  }
-};
+    public:
+        Tactic(const char *name) : Tactic(Z3_mk_tactic(ctx(), name)) {
+            this->name = name;
+        }
+
+        Tactic(Tactic &&other) {
+            swap(t, other.t);
+            swap(name, other.name);
+        }
+
+        void operator=(Tactic &&other) {
+            destroy();
+            t = nullptr;
+            name = nullptr;
+            swap(t, other.t);
+            swap(name, other.name);
+        }
+
+        ~Tactic() { destroy(); }
+
+        friend class smt::Solver;
+
+        friend class MultiTactic;
+    };
+
+
+    class MultiTactic final : public Tactic {
+        vector<Tactic> tactics;
+        Z3_goal goal = nullptr;
+
+    public:
+        MultiTactic(initializer_list<const char *> ts) : Tactic("skip") {
+            if (tactic_verbose) {
+                goal = Z3_mk_goal(ctx(), true, false, false);
+                Z3_goal_inc_ref(ctx(), goal);
+            }
+
+            for (auto I = ts.begin(), E = ts.end(); I != E; ++I) {
+                Tactic t(*I);
+                *this = mkThen(*this, t);
+                if (tactic_verbose)
+                    tactics.emplace_back(move(t));
+            }
+        }
+
+        ~MultiTactic() {
+            if (goal)
+                Z3_goal_dec_ref(ctx(), goal);
+        }
+
+        void operator=(Tactic &&other) {
+            static_cast<Tactic &>(*this) = move(other);
+        }
+
+        static Tactic mkThen(const Tactic &a, const Tactic &b) {
+            return Z3_tactic_and_then(ctx(), a.t, b.t);
+        }
+
+        void add(Z3_ast ast) {
+            if (tactic_verbose)
+                Z3_goal_assert(ctx(), goal, ast);
+        }
+
+        void check() {
+            if (!tactic_verbose)
+                return;
+
+            string last_result;
+
+            for (auto &t : tactics) {
+                dbg() << "\nApplying " << t.name << endl;
+
+                Tactic to(Z3_tactic_try_for(ctx(), t.t, 5000));
+                Tactic skip(Z3_tactic_skip(ctx()));
+                to = Tactic(Z3_tactic_or_else(ctx(), to.t, skip.t));
+                auto r = Z3_tactic_apply(ctx(), to.t, goal);
+                Z3_apply_result_inc_ref(ctx(), r);
+                reset_solver();
+
+                for (unsigned i = 0, e = Z3_apply_result_get_num_subgoals(ctx(), r);
+                     i != e; ++i) {
+                    auto ng = Z3_apply_result_get_subgoal(ctx(), r, i);
+                    for (unsigned ii = 0, ee = Z3_goal_size(ctx(), ng); ii != ee; ++ii) {
+                        add(Z3_goal_formula(ctx(), ng, ii));
+                    }
+                }
+                Z3_apply_result_dec_ref(ctx(), r);
+
+                string new_r = Z3_goal_to_string(ctx(), goal);
+                if (new_r != last_result) {
+                    dbg() << new_r << '\n';
+                    last_result = move(new_r);
+                }
+                else {
+                    dbg() << "(no change)\n";
+                }
+            }
+        }
+
+        void reset_solver() {
+            if (tactic_verbose)
+                Z3_goal_reset(ctx(), goal);
+        }
+    };
 }
 
 static optional<MultiTactic> tactic;
@@ -155,336 +157,342 @@ static optional<MultiTactic> tactic;
 
 namespace smt {
 
-Model::Model(Z3_model m) : m(m) {
-  Z3_model_inc_ref(ctx(), m);
-}
-
-Model::~Model() {
-  if (m)
-    Z3_model_dec_ref(ctx(), m);
-}
-
-void Model::operator=(Model &&other) {
-  this->~Model();
-  m = 0;
-  swap(other.m, m);
-}
-
-expr Model::eval(const expr &var, bool complete) const {
-  Z3_ast val;
-  ENSURE(Z3_model_eval(ctx(), m, var(), complete, &val));
-  return val;
-}
-
-uint64_t Model::getUInt(const expr &var) const {
-  uint64_t n;
-  ENSURE((*this)[var].isUInt(n));
-  return n;
-}
-
-int64_t Model::getInt(const expr &var) const {
-  int64_t n;
-  ENSURE((*this)[var].isInt(n));
-  return n;
-}
-
-bool Model::hasFnModel(const expr &fn) const {
-  auto fn_decl = fn.decl();
-  return fn_decl ? Z3_model_has_interp(ctx(), m, fn_decl) : false;
-}
-
-pair<expr, expr> Model::iterator::operator*(void) const {
-  auto decl = Z3_model_get_const_decl(ctx(), m, idx);
-  return { expr::mkConst(decl), Z3_model_get_const_interp(ctx(), m, decl) };
-}
-
-Model::iterator Model::begin() const {
-  return { m, 0 };
-}
-
-Model::iterator Model::end() const {
-  return { nullptr, Z3_model_get_num_consts(ctx(), m) };
-}
-
-ostream& operator<<(ostream &os, const Model &m) {
-  return os << Z3_model_to_string(ctx(), m.m);
-}
-
-void Result::printModel() {
-  Z3_set_ast_print_mode(ctx(), Z3_PRINT_SMTLIB2_COMPLIANT);
-  printf("Native z3-model: %s\n", Z3_model_to_string(ctx(), m.m));
-  fflush(stdout);
-}
-
-static bool print_queries = false;
-void solver_print_queries(bool yes) {
-  print_queries = yes;
-}
-
-void solver_tactic_verbose(bool yes) {
-  tactic_verbose = yes;
-}
-
-Solver::Solver(bool simple) {
-  s = simple
-      ? Z3_mk_simple_solver(ctx())
-      : Z3_mk_solver_from_tactic(ctx(), tactic->t);
-  Z3_solver_inc_ref(ctx(), s);
-}
-
-Solver::~Solver() {
-  Z3_solver_dec_ref(ctx(), s);
-  tactic->reset_solver();
-}
-
-void Solver::add(const expr &e) {
-  if (e.isFalse()) {
-    is_unsat = true;
-  } else if (e.isValid()) {
-    auto ast = e();
-    Z3_solver_assert(ctx(), s, ast);
-    tactic->add(ast);
-  } else {
-    valid = false;
-  }
-}
-
-void Solver::block(const Model &m, Solver *sneg) {
-  set<expr> assignments;
-  for (const auto &[var, val] : m) {
-    assignments.insert(var == val);
-  }
-
-  if (sneg) {
-    // simple left-to-right variable discard algorithm
-    for (auto I = assignments.begin(); I != assignments.end(); ) {
-      SolverPush push(*sneg);
-      expr val = *I;
-      I = assignments.erase(I);
-
-      sneg->add(expr::mk_and(assignments));
-      if (!sneg->check().isUnsat())
-        assignments.insert(move(val));
+    Model::Model(Z3_model m) : m(m) {
+        Z3_model_inc_ref(ctx(), m);
     }
-  }
 
-  add(!expr::mk_and(assignments));
-}
+    Model::~Model() {
+        if (m)
+            Z3_model_dec_ref(ctx(), m);
+    }
 
-void Solver::reset() {
-  Z3_solver_reset(ctx(), s);
-  tactic->reset_solver();
-}
+    void Model::operator=(Model &&other) {
+        this->~Model();
+        m = 0;
+        swap(other.m, m);
+    }
 
-expr Solver::assertions() const {
-  auto vect = Z3_solver_get_assertions(ctx(), s);
-  Z3_ast_vector_inc_ref(ctx(), vect);
-  expr ret(true);
+    expr Model::eval(const expr &var, bool complete) const {
+        Z3_ast val;
+        ENSURE(Z3_model_eval(ctx(), m, var(), complete, &val));
+        return val;
+    }
 
-  for (unsigned i = 0, e = Z3_ast_vector_size(ctx(), vect); i != e; ++i) {
-    ret &= Z3_ast_vector_get(ctx(), vect, i);
-  }
+    uint64_t Model::getUInt(const expr &var) const {
+        uint64_t n;
+        ENSURE((*this)[var].isUInt(n));
+        return n;
+    }
 
-  Z3_ast_vector_dec_ref(ctx(), vect);
-  return ret;
-}
+    int64_t Model::getInt(const expr &var) const {
+        int64_t n;
+        ENSURE((*this)[var].isInt(n));
+        return n;
+    }
 
-Result Solver::check() const {
-  std::vector<smt::expr> assumptions;
-  return check(assumptions);
-}
+    bool Model::hasFnModel(const expr &fn) const {
+        auto fn_decl = fn.decl();
+        return fn_decl ? Z3_model_has_interp(ctx(), m, fn_decl) : false;
+    }
 
-Result Solver::check(std::vector<smt::expr> assumptions) const {
-  if (!valid) {
-    ++num_invalid;
-    return Result::INVALID;
-  }
+    pair<expr, expr> Model::iterator::operator*(void) const {
+        auto decl = Z3_model_get_const_decl(ctx(), m, idx);
+        return {expr::mkConst(decl), Z3_model_get_const_interp(ctx(), m, decl)};
+    }
 
-  if (is_unsat) {
-    ++num_trivial;
-    return Result::UNSAT;
-  }
+    Model::iterator Model::begin() const {
+        return {m, 0};
+    }
 
-  if (!config::smt_benchmark_dir.empty()) {
-    const char *banner =
-    R"(Alive2 compiler optimization refinement query
+    Model::iterator Model::end() const {
+        return {nullptr, Z3_model_get_num_consts(ctx(), m)};
+    }
+
+    ostream &operator<<(ostream &os, const Model &m) {
+        return os << Z3_model_to_string(ctx(), m.m);
+    }
+
+    void Result::printModel() {
+        Z3_set_ast_print_mode(ctx(), Z3_PRINT_SMTLIB2_COMPLIANT);
+        printf("Native z3-model: %s\n", Z3_model_to_string(ctx(), m.m));
+        fflush(stdout);
+    }
+
+    static bool print_queries = false;
+
+    void solver_print_queries(bool yes) {
+        print_queries = yes;
+    }
+
+    void solver_tactic_verbose(bool yes) {
+        tactic_verbose = yes;
+    }
+
+    Solver::Solver(bool simple) {
+        s = simple
+            ? Z3_mk_simple_solver(ctx())
+            : Z3_mk_solver_from_tactic(ctx(), tactic->t);
+        Z3_solver_inc_ref(ctx(), s);
+    }
+
+    Solver::~Solver() {
+        Z3_solver_dec_ref(ctx(), s);
+        tactic->reset_solver();
+    }
+
+    void Solver::add(const expr &e) {
+        if (e.isFalse()) {
+            is_unsat = true;
+        }
+        else if (e.isValid()) {
+            auto ast = e();
+            Z3_solver_assert(ctx(), s, ast);
+            tactic->add(ast);
+        }
+        else {
+            valid = false;
+        }
+    }
+
+    void Solver::block(const Model &m, Solver *sneg) {
+        set<expr> assignments;
+        for (const auto &[var, val] : m) {
+            assignments.insert(var == val);
+        }
+
+        if (sneg) {
+            // simple left-to-right variable discard algorithm
+            for (auto I = assignments.begin(); I != assignments.end();) {
+                SolverPush push(*sneg);
+                expr val = *I;
+                I = assignments.erase(I);
+
+                sneg->add(expr::mk_and(assignments));
+                if (!sneg->check().isUnsat())
+                    assignments.insert(move(val));
+            }
+        }
+
+        add(!expr::mk_and(assignments));
+    }
+
+    void Solver::reset() {
+        Z3_solver_reset(ctx(), s);
+        tactic->reset_solver();
+    }
+
+    expr Solver::assertions() const {
+        auto vect = Z3_solver_get_assertions(ctx(), s);
+        Z3_ast_vector_inc_ref(ctx(), vect);
+        expr ret(true);
+
+        for (unsigned i = 0, e = Z3_ast_vector_size(ctx(), vect); i != e; ++i) {
+            ret &= Z3_ast_vector_get(ctx(), vect, i);
+        }
+
+        Z3_ast_vector_dec_ref(ctx(), vect);
+        return ret;
+    }
+
+    Result Solver::check() const {
+        std::vector<smt::expr> assumptions;
+        return check(assumptions);
+    }
+
+    Result Solver::check(std::vector<smt::expr> assumptions) const {
+        if (!valid) {
+            ++num_invalid;
+            return Result::INVALID;
+        }
+
+        if (is_unsat) {
+            ++num_trivial;
+            return Result::UNSAT;
+        }
+
+        if (!config::smt_benchmark_dir.empty()) {
+            const char *banner =
+                    R"(Alive2 compiler optimization refinement query
 ; More info in "Alive2: Bounded Translation Validation for LLVM", PLDI'21.)";
-    expr fml = assertions();
-    if (!fml.isTrue()) {
-      auto str = Z3_benchmark_to_smtlib_string(ctx(), banner, nullptr, nullptr,
-                                               nullptr, 0, nullptr, fml());
-      ofstream file(get_random_filename(config::smt_benchmark_dir, "smt2"));
-      if (!file.is_open()) {
-        dbg() << "Alive2: Couldn't open smtlib benchmark file!" << endl;
-        exit(1);
-      }
-      file << str;
+            expr fml = assertions();
+            if (!fml.isTrue()) {
+                auto str = Z3_benchmark_to_smtlib_string(ctx(), banner, nullptr, nullptr,
+                                                         nullptr, 0, nullptr, fml());
+                ofstream file(get_random_filename(config::smt_benchmark_dir, "smt2"));
+                if (!file.is_open()) {
+                    dbg() << "Alive2: Couldn't open smtlib benchmark file!" << endl;
+                    exit(1);
+                }
+                file << str;
+            }
+        }
+
+        if (config::skip_smt) {
+            ++num_skips;
+            return Result::SKIP;
+        }
+
+        ++num_queries;
+        if (print_queries)
+            dbg() << "\nSMT query:\n" << Z3_solver_to_string(ctx(), s) << endl;
+
+        tactic->check();
+
+        std::vector<Z3_ast> assumptions_ast;
+
+        for (auto &&assumption : assumptions) {
+            if (assumption.isTrue())
+                continue;
+            assumptions_ast.push_back(assumption());
+        }
+
+        switch (Z3_solver_check_assumptions(ctx(), s, assumptions_ast.size(), assumptions_ast.data())) {
+            case Z3_L_FALSE:
+                ++num_unsats;
+                return Result::UNSAT;
+            case Z3_L_TRUE:
+                ++num_sats;
+                return Z3_solver_get_model(ctx(), s);
+            case Z3_L_UNDEF: {
+                string_view reason = Z3_solver_get_reason_unknown(ctx(), s);
+                if (reason == "timeout") {
+                    ++num_timeout;
+                    return Result::TIMEOUT;
+                }
+                ++num_errors;
+                return {Result::ERROR, string(reason)};
+            }
+            default:
+                UNREACHABLE();
+        }
     }
-  }
 
-  if (config::skip_smt) {
-    ++num_skips;
-    return Result::SKIP;
-  }
-
-  ++num_queries;
-  if (print_queries)
-    dbg() << "\nSMT query:\n" << Z3_solver_to_string(ctx(), s) << endl;
-
-  tactic->check();
-
-  std::vector<Z3_ast> assumptions_ast;
-
-  for (auto&& assumption : assumptions) {
-    if (assumption.isTrue())
-      continue;
-    assumptions_ast.push_back(assumption());
-  }
-
-  switch (Z3_solver_check_assumptions(ctx(), s, assumptions_ast.size(), assumptions_ast.data())) {
-  case Z3_L_FALSE:
-    ++num_unsats;
-    return Result::UNSAT;
-  case Z3_L_TRUE:
-    ++num_sats;
-    return Z3_solver_get_model(ctx(), s);
-  case Z3_L_UNDEF: {
-    string_view reason = Z3_solver_get_reason_unknown(ctx(), s);
-    if (reason == "timeout") {
-      ++num_timeout;
-      return Result::TIMEOUT;
+    Result check_expr(const expr &e) {
+        Solver s(false);
+        s.add(e);
+        return s.check();
     }
-    ++num_errors;
-    return { Result::ERROR, string(reason) };
-  }
-  default:
-    UNREACHABLE();
-  }
-}
 
-Result check_expr(const expr &e) {
-  Solver s(false);
-  s.add(e);
-  return s.check();
-}
+    std::string Solver::toString() const {
+        return {Z3_solver_to_string(ctx(), s)};
+    }
 
-std::string Solver::toString() const {
-  return { Z3_solver_to_string(ctx(), s) };
-}
+    SolverPush::SolverPush(Solver &s) : s(s), valid(s.valid), is_unsat(s.is_unsat) {
+        Z3_solver_push(ctx(), s.s);
+    }
 
-SolverPush::SolverPush(Solver &s) : s(s), valid(s.valid), is_unsat(s.is_unsat) {
-  Z3_solver_push(ctx(), s.s);
-}
+    SolverPush::~SolverPush() {
+        s.valid = valid;
+        s.is_unsat = is_unsat;
+        Z3_solver_pop(ctx(), s.s, 1);
+    }
 
-SolverPush::~SolverPush() {
-  s.valid = valid;
-  s.is_unsat = is_unsat;
-  Z3_solver_pop(ctx(), s.s, 1);
-}
+    PropagatorBase::PropagatorBase(context* ctx) : _ctx(ctx), _s(nullptr) { }
 
-PropagatorBase::PropagatorBase(Solver *s) : s(s) {
-  Z3_solver_propagate_init(ctx(), s->s, this, push_eh, pop_eh, fresh_eh);
-}
+    PropagatorBase::PropagatorBase(Solver *s) : _ctx(&smt::ctx), _s(s) {
+        Z3_solver_propagate_init(ctx()(), s->s, this, push_eh, pop_eh, fresh_eh);
+    }
 
-void PropagatorBase::register_fixed() {
-  assert(s);
-  m_fixed_eh = [this](unsigned id, expr const &e) { fixed(id, e); };
-  Z3_solver_propagate_fixed(ctx(), s->s, fixed_eh);
-}
+    void PropagatorBase::register_fixed() {
+        m_fixed_eh = [this](expr const &ast, expr const &value) { fixed(ast, value); };
+        if (_s) {
+            Z3_solver_propagate_fixed(ctx()(), _s->s, fixed_eh);
+        }
+    }
 
-void PropagatorBase::register_final() {
-  assert(s);
-  m_final_eh = [this]() { final(); };
-  Z3_solver_propagate_final(ctx(), s->s, final_eh);
-}
+    void PropagatorBase::register_final() {
+        m_final_eh = [this]() { final(); };
+        if (_s) {
+            Z3_solver_propagate_final(ctx()(), _s->s, final_eh);
+        }
+    }
 
-void PropagatorBase::register_created() {
-  assert(s);
-  m_created_eh = [this](expr const &e, unsigned id) { created(e, id); };
-  Z3_solver_propagate_created(ctx(), s->s, created_eh);
-}
+    void PropagatorBase::register_created() {
+        m_created_eh = [this](expr const &ast) { created(ast); };
+        if (_s) {
+            Z3_solver_propagate_created(ctx()(), _s->s, created_eh);
+        }
+    }
 
-unsigned PropagatorBase::register_expr(const expr &e) {
-  assert(s);
-  if (cb != nullptr)
-    return Z3_solver_propagate_register_cb(ctx(), cb, e.ast());
-  else
-    return Z3_solver_propagate_register(ctx(), s->s, e.ast());
-}
+    void PropagatorBase::register_expr(const expr &e) {
+        if (cb != nullptr)
+            Z3_solver_propagate_register_cb(ctx()(), cb, e.ast());
+        else
+            Z3_solver_propagate_register(ctx()(), _s->s, e.ast());
+    }
 
-void PropagatorBase::conflict(unsigned int num_fixed,
-                              const unsigned int *fixed) {
-  assert(cb);
-  expr conseq = expr::mkFalse();
-  Z3_solver_propagate_consequence(ctx(), cb, num_fixed, fixed, 0, nullptr,
-                                  nullptr, conseq.ast());
-}
+    void PropagatorBase::conflict(unsigned num_fixed, const expr *_fixed) {
+        assert(cb);
+        expr conseq = expr::mkFalse();
+        Z3_ast fixed[num_fixed];
+        for (unsigned i = 0; i < num_fixed; i++) {
+            fixed[i] = _fixed[i].ast();
+        }
+        Z3_solver_propagate_consequence(ctx()(), cb, num_fixed, fixed, 0, nullptr,
+                                        nullptr, conseq.ast());
+    }
 
-void PropagatorBase::propagate(unsigned int num_fixed,
-                               const unsigned int *fixed, const expr &conseq) {
-  assert(cb);
-  Z3_solver_propagate_consequence(ctx(), cb, num_fixed, fixed, 0, nullptr,
-                                  nullptr, conseq.ast());
-}
+    void PropagatorBase::propagate(unsigned num_fixed,
+                                   const expr *_fixed, const expr &conseq) {
+        assert(cb);
+        Z3_ast fixed[num_fixed];
+        for (unsigned int i = 0; i < num_fixed; i++) {
+            fixed[i] = _fixed[i].ast();
+        }
+        Z3_solver_propagate_consequence(ctx()(), cb, num_fixed, fixed, 0, nullptr,
+                                        nullptr, conseq.ast());
+    }
 
-void PropagatorBase::propagate(unsigned int num_fixed,
-                               const unsigned int *fixed, unsigned int num_eqs,
-                               const unsigned int *lhs, const unsigned int *rhs,
-                               const expr &conseq) {
-  assert(cb);
-  Z3_solver_propagate_consequence(ctx(), cb, num_fixed, fixed, num_eqs, lhs,
-                                  rhs, conseq.ast());
-}
+    void solver_print_stats(ostream &os) {
+        float total = num_queries / 100.0;
+        float trivial_pc = num_queries == 0 ? 0 :
+                           (num_trivial * 100.0) / (num_trivial + num_queries);
+        float to_pc = num_queries == 0 ? 0 : num_timeout / total;
+        float error_pc = num_queries == 0 ? 0 : num_errors / total;
+        float sat_pc = num_queries == 0 ? 0 : num_sats / total;
+        float unsat_pc = num_queries == 0 ? 0 : num_unsats / total;
 
-void solver_print_stats(ostream &os) {
-  float total = num_queries / 100.0;
-  float trivial_pc = num_queries == 0 ? 0 :
-                       (num_trivial * 100.0) / (num_trivial + num_queries);
-  float to_pc      = num_queries == 0 ? 0 : num_timeout / total;
-  float error_pc   = num_queries == 0 ? 0 : num_errors / total;
-  float sat_pc     = num_queries == 0 ? 0 : num_sats / total;
-  float unsat_pc   = num_queries == 0 ? 0 : num_unsats / total;
-
-  os << fixed << setprecision(1);
-  os << "\n------------------- SMT STATS -------------------\n"
-        "Num queries: " << num_queries << "\n"
-        "Num invalid: " << num_invalid << "\n"
-        "Num skips:   " << num_skips << "\n"
-        "Num trivial: " << num_trivial << " (" << trivial_pc << "%)\n"
-        "Num timeout: " << num_timeout << " (" << to_pc << "%)\n"
-        "Num errors:  " << num_errors << " (" << error_pc << "%)\n"
-        "Num SAT:     " << num_sats << " (" << sat_pc << "%)\n"
-        "Num UNSAT:   " << num_unsats << " (" << unsat_pc << "%)\n";
-}
+        os << fixed << setprecision(1);
+        os << "\n------------------- SMT STATS -------------------\n"
+              "Num queries: " << num_queries << "\n"
+                                                "Num invalid: " << num_invalid << "\n"
+                                                                                  "Num skips:   " << num_skips << "\n"
+                                                                                                                  "Num trivial: " << num_trivial << " (" << trivial_pc << "%)\n"
+                                                                                                                                                                          "Num timeout: " << num_timeout << " (" << to_pc << "%)\n"
+                                                                                                                                                                                                                             "Num errors:  " << num_errors << " (" << error_pc << "%)\n"
+                                                                                                                                                                                                                                                                                  "Num SAT:     "
+           << num_sats << " (" << sat_pc << "%)\n"
+                                            "Num UNSAT:   " << num_unsats << " (" << unsat_pc << "%)\n";
+    }
 
 
-EnableSMTQueriesTMP::EnableSMTQueriesTMP() : old(config::skip_smt) {
-  config::skip_smt = false;
-}
+    EnableSMTQueriesTMP::EnableSMTQueriesTMP() : old(config::skip_smt) {
+        config::skip_smt = false;
+    }
 
-EnableSMTQueriesTMP::~EnableSMTQueriesTMP() {
-  config::skip_smt = old;
-}
+    EnableSMTQueriesTMP::~EnableSMTQueriesTMP() {
+        config::skip_smt = old;
+    }
 
 
-void solver_init() {
-  tactic.emplace({
-    "simplify",
-    "propagate-values",
-    "simplify",
-    "elim-uncnstr",
-    "qe-light",
-    "simplify",
-    "elim-uncnstr",
-    "reduce-args",
-    "qe-light",
-    "simplify",
-    "smt"
-  });
-}
+    void solver_init() {
+        tactic.emplace({
+                               "simplify",
+                               "propagate-values",
+                               "simplify",
+                               "elim-uncnstr",
+                               "qe-light",
+                               "simplify",
+                               "elim-uncnstr",
+                               "reduce-args",
+                               "qe-light",
+                               "simplify",
+                               "smt"
+                       });
+    }
 
-void solver_destroy() {
-  tactic.reset();
-}
+    void solver_destroy() {
+        tactic.reset();
+    }
 
 }

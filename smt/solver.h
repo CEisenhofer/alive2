@@ -3,6 +3,7 @@
 // Copyright (c) 2018-present The Alive2 Authors.
 // Distributed under the MIT license that can be found in the LICENSE file.
 
+#include "smt/ctx.h"
 #include "smt/expr.h"
 #include <cassert>
 #include <ostream>
@@ -15,9 +16,7 @@ typedef struct _Z3_solver* Z3_solver;
 typedef struct _Z3_solver_callback* Z3_solver_callback;
 
 namespace smt {
-
-class PropagatorBase;
-
+    
 class Model {
   Z3_model m;
 
@@ -138,15 +137,18 @@ public:
 
 class PropagatorBase {
 
-  typedef std::function<void(unsigned, expr const &)> fixed_eh_t;
+  typedef std::function<void(expr const &, expr const &)> fixed_eh_t;
   typedef std::function<void(void)> final_eh_t;
-  typedef std::function<void(expr const &, unsigned)> created_eh_t;
+  typedef std::function<void(expr const &)> created_eh_t;
 
   final_eh_t m_final_eh;
   fixed_eh_t m_fixed_eh;
   created_eh_t m_created_eh;
-  Solver *s;
-  Z3_solver_callback cb { nullptr };
+  context* _ctx;
+  Solver* _s;
+  std::vector<smt::context*> subcontexts;
+
+  Z3_solver_callback cb = nullptr;
 
   struct scoped_cb {
     PropagatorBase &p;
@@ -159,23 +161,30 @@ class PropagatorBase {
     }
   };
 
-  static void push_eh(void *p) {
+  static void push_eh(void *p, Z3_solver_callback cb) {
+    scoped_cb _cb(p, cb);
     static_cast<PropagatorBase *>(p)->push();
   }
 
-  static void pop_eh(void *p, unsigned num_scopes) {
+  static void pop_eh(void *p, Z3_solver_callback cb, unsigned num_scopes) {
+    scoped_cb _cb(p, cb);
     static_cast<PropagatorBase *>(p)->pop(num_scopes);
   }
 
-  static void *fresh_eh(void *p, Z3_context context) {
-    return static_cast<PropagatorBase *>(p)->fresh(context);
+  static void *fresh_eh(void *_p, Z3_context context) {
+    PropagatorBase* p = static_cast<PropagatorBase*>(_p);
+    smt::context* c = new smt::context();
+    c->ctx = context;
+    p->subcontexts.push_back(c);
+    return p->fresh(c);
   }
 
-  static void fixed_eh(void *_p, Z3_solver_callback cb, unsigned id, Z3_ast _value) {
+  static void fixed_eh(void *_p, Z3_solver_callback cb, Z3_ast _ast, Z3_ast _value) {
     PropagatorBase *p = static_cast<PropagatorBase *>(_p);
     scoped_cb _cb(p, cb);
     expr value(_value);
-    static_cast<PropagatorBase *>(p)->m_fixed_eh(id, value);
+    expr ast(_ast);
+    static_cast<PropagatorBase *>(p)->m_fixed_eh(ast, value);
   }
 
   static void final_eh(void *p, Z3_solver_callback cb) {
@@ -183,21 +192,30 @@ class PropagatorBase {
     static_cast<PropagatorBase *>(p)->m_final_eh();
   }
 
-  static void created_eh(void *p, Z3_solver_callback cb, Z3_ast _value, unsigned id) {
+  static void created_eh(void *p, Z3_solver_callback cb, Z3_ast _ast) {
     scoped_cb _cb(p, cb);
-    expr value(_value);
-    static_cast<PropagatorBase *>(p)->m_created_eh(value, id);
+    expr ast(_ast);
+    static_cast<PropagatorBase *>(p)->m_created_eh(ast);
   }
 
 public:
+  PropagatorBase(context* ctx);
   PropagatorBase(Solver *s);
+
+  context& ctx() { return *_ctx; }
+  Solver& s() { return *_s; }
 
   virtual void push() = 0;
   virtual void pop(unsigned num_scopes) = 0;
 
-  virtual ~PropagatorBase() = default;
+  virtual ~PropagatorBase() {
+    for (auto& subcontext : subcontexts) {
+        // subcontext->destroy(); do not destroy; will be done by Z3
+        delete subcontext;
+    }
+  }
 
-  virtual PropagatorBase *fresh(Z3_context ctx) = 0;
+  virtual PropagatorBase *fresh(smt::context* c) = 0;
 
   void register_fixed();
 
@@ -205,21 +223,17 @@ public:
 
   void register_created();
 
-  virtual void fixed(unsigned, expr const &) {}
+  virtual void fixed(expr const &, expr const &) {}
 
   virtual void final() {}
 
-  virtual void created(expr const &, unsigned) {}
+  virtual void created(expr const &) {}
 
-  unsigned register_expr(expr const &e);
+  void register_expr(expr const &e);
 
-  void conflict(unsigned num_fixed, unsigned const *fixed);
+  void conflict(unsigned num_fixed, expr const *fixed);
 
-  void propagate(unsigned num_fixed, unsigned const *fixed,
-                 expr const &conseq);
-
-  void propagate(unsigned num_fixed, unsigned const *fixed, unsigned num_eqs,
-                 unsigned const *lhs, unsigned const *rhs, expr const &conseq);
+  void propagate(unsigned num_fixed, expr const *fixed, expr const &conseq);
 };
 
 void solver_print_queries(bool yes);

@@ -384,3 +384,22 @@ static expr mkIf_fold_fn(const expr &cond, T1 &&a, T2 &&b) {
 }
 
 }
+
+namespace std {
+
+    template<>
+    struct hash<smt::expr> {
+        std::size_t operator()(const smt::expr &k) const {
+          return k.hash();
+        }
+    };
+
+    // Do not use Z3's == operator in the hash table
+
+    template<>
+    struct equal_to<smt::expr> {
+        bool operator()(const smt::expr &lhs, const smt::expr &rhs) const {
+          return lhs.eq(rhs);
+        }
+    };
+}

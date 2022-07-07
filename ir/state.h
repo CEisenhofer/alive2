@@ -32,6 +32,54 @@ public:
     std::set<smt::expr> undef_vars;
   };
 
+  struct CollisionCandidate {
+    smt::expr addrExpr;
+    smt::expr sizeExpr;
+    smt::expr aliveExpr;
+    unsigned correspondingIndex = (unsigned)-1;
+
+    CollisionCandidate(const smt::expr &addrExpr, const smt::expr &sizeExpr, const smt::expr &aliveExpr) :
+      addrExpr(addrExpr),sizeExpr(sizeExpr),aliveExpr(aliveExpr) {}
+
+    auto operator<=>(const CollisionCandidate &rhs) const = default;
+
+    std::string toString() const {
+      return
+      "addr: " + addrExpr.toString() + "\n" +
+      "size: " + sizeExpr.toString() + "\n" +
+      "alive: " + aliveExpr.toString();
+
+    }
+  };
+
+  struct MemoryBlockExpressions {
+    smt::expr addrExpr;
+    smt::expr sizeExpr;
+    smt::expr alignExpr;
+    smt::expr allocatedExpr;
+    std::vector<CollisionCandidate> collisionCandidates;
+    bool local;
+
+    MemoryBlockExpressions(const smt::expr &addr, const smt::expr &size, const smt::expr &align)
+             : addrExpr(addr), sizeExpr(size), alignExpr(align), allocatedExpr(true), collisionCandidates(std::vector<CollisionCandidate>()), local(false) {}
+
+    MemoryBlockExpressions(const smt::expr &addr, const smt::expr &size, const smt::expr &align, const smt::expr &allocated, std::vector<CollisionCandidate> candidate)
+                : addrExpr(addr), sizeExpr(size), alignExpr(align), allocatedExpr(allocated), collisionCandidates(candidate), local(true) { }
+
+    auto operator<=>(const MemoryBlockExpressions &rhs) const = default;
+
+    std::string toString() const {
+      std::string ret =
+        "addr: " + addrExpr.toString() + "\n" +
+        "size: " + sizeExpr.toString() + "\n" +
+        "align: " + alignExpr.toString() + "\n" +
+        "allocated: " + allocatedExpr.toString() + "\n";
+      for (const auto & collisionCandidate : collisionCandidates)
+        ret += "\nCollision candidates: " + collisionCandidate.toString();
+      return ret;
+    }
+  };
+
 private:
   struct CurrentDomain {
     smt::expr path = true; // path from fn entry
@@ -103,6 +151,9 @@ private:
   bool is_initialization_phase = true;
   smt::AndExpr precondition;
   smt::AndExpr axioms;
+
+  std::vector<MemoryBlockExpressions> local_blks_to_register;
+  std::vector<MemoryBlockExpressions> global_blks_to_register;
 
   std::set<std::pair<std::string,std::optional<smt::expr>>> used_approximations;
 
@@ -213,6 +264,8 @@ public:
   void addUB(const smt::expr &ub);
   void addUB(smt::AndExpr &&ubs);
   void addNoReturn(const smt::expr &cond);
+  void addGlobalBlock(const smt::expr &addr, const smt::expr &size, const smt::expr &align);
+  void addLocalBlock(const smt::expr &addr, const smt::expr &size, const smt::expr &align, const smt::expr &allocated, std::vector<CollisionCandidate> &alive);
 
   std::vector<StateValue>
     addFnCall(const std::string &name, std::vector<StateValue> &&inputs,
@@ -247,6 +300,14 @@ public:
   const auto& getValues() const { return values; }
   const auto& getQuantVars() const { return quantified_vars; }
   const auto& getFnQuantVars() const { return fn_call_qvars; }
+  const auto& getGlobalBlocks() const { return global_blks_to_register; }
+  const auto& getLocalBlocks() const { return local_blks_to_register; }
+
+  smt::expr getDisjProxyExpr(const std::string name, std::vector<smt::expr> domain) const;
+  // gets a proxy user-function used to simulate the disjointness axioms (user-propagator)
+  smt::expr getProxy(const char* name, std::vector<MemoryBlockExpressions>& blocks, std::unordered_map<std::string, std::vector<MemoryBlockExpressions>*>& userFunctionToInfo) const;
+  inline smt::expr getLocalProxy(std::unordered_map<std::string, std::vector<MemoryBlockExpressions>*>& userFunctionToInfo) { return getProxy("localDisj", local_blks_to_register, userFunctionToInfo); }
+  inline smt::expr getGlobalProxy(std::unordered_map<std::string, std::vector<MemoryBlockExpressions>*>& userFunctionToInfo) { return getProxy("globalDisj", global_blks_to_register, userFunctionToInfo); }
 
   auto& functionDomain() const { return function_domain; }
   smt::expr sinkDomain() const;

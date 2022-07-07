@@ -10,6 +10,7 @@
 #include "smt/exprs.h"
 #include "util/big_num.h"
 #include "util/spaceship.h"
+#include <climits>
 #include <compare>
 #include <map>
 #include <optional>
@@ -137,72 +138,6 @@ class Memory {
     std::weak_ordering operator<=>(const MemBlock &rhs) const;
   };
 
-public:
-  struct BlockData {
-
-    bool local;
-
-    uint64_t id; // unique id; for non "universally quantified blocks": bid
-    unsigned dimension; // elements in the same dimension may intersection; other dimension ==> for sure no interesection
-
-    // the smt expressions of the fields
-    smt::expr addrExpr;
-    smt::expr sizeExpr; // Not extended/truncated. The unaltered constant
-    smt::expr alignExpr;
-    smt::expr allocatedExpr;
-    smt::expr aliveExpr;
-    smt::expr predExpr;
-
-    // Concrete values of the fields (if known)
-    util::BigNum* addrValue;
-    util::BigNum* sizeValue;
-    // value of aligned is currently not required
-    std::optional<bool> allocatedValue;
-    std::optional<bool> aliveValue;
-    std::optional<bool> predValue;
-
-    // The [z3] id of the corresponding field entry (if known)
-    size_t addrId = UINT_MAX;
-    size_t sizeId = UINT_MAX;
-    size_t allocatedId = UINT_MAX;
-    size_t aliveId = UINT_MAX;
-    size_t predId = UINT_MAX;
-
-    BlockData() : id(UINT32_MAX), dimension(0) {}
-
-    BlockData(bool local, uint64_t id, unsigned dimension, const smt::expr &addr, const smt::expr &size, const smt::expr &align)
-            : BlockData(local, id, dimension, addr, size, align, true, true, true) {}
-
-    BlockData(bool local, uint64_t id, unsigned dimension, const smt::expr &addr, const smt::expr &size, const smt::expr &align,
-              const smt::expr &allocated, const smt::expr &alive, const smt::expr &predId);
-
-    BlockData(const BlockData &);
-
-    BlockData(const BlockData & other, uint64_t id, unsigned dimension, const smt::expr &addr);
-
-    virtual ~BlockData();
-
-    bool addAddr(const smt::expr& e);
-    bool addSize(const smt::expr& e);
-    bool addAllocated(const smt::expr& e);
-    bool addAlive(const smt::expr& e);
-    bool addPred(const smt::expr& e);
-
-    bool isValid() const {
-      return addrValue && sizeValue && allocatedValue && *allocatedValue && aliveValue && *aliveValue && *predValue;
-    }
-
-    bool hasFunction() {
-      return dimension <= 1; // all other blocks should be represented by the disjointness function
-    }
-
-    auto operator<=>(const BlockData &rhs) const = default;
-
-    std::string toString() const;
-};
-
-private:
-
   std::vector<MemBlock> non_local_block_val;
   std::vector<MemBlock> local_block_val;
 
@@ -220,8 +155,6 @@ private:
 
   std::vector<unsigned> byval_blks;
   AliasSet escaped_local_blks;
-
-  std::vector<BlockData> local_blks_to_register;
 
   bool hasEscapedLocals() const {
     return escaped_local_blks.numMayAlias(true) > 0;
@@ -277,6 +210,10 @@ private:
   smt::expr blockRefined(const Pointer &src, const Pointer &tgt, unsigned bid,
                          std::set<smt::expr> &undef) const;
 
+  smt::expr disjoint_local_blocks(const Memory &m, const smt::expr &addr,
+                                    const smt::expr &sz, const smt::expr &align,
+                                    const smt::expr &allocated, const smt::FunctionExpr &blk_addr);
+
   void mkLocalDisjAddrAxioms(const smt::expr &allocated,
                              const smt::expr &short_bid,
                              const smt::expr &size, const smt::expr &align,
@@ -305,7 +242,7 @@ public:
 
   Memory(State &state);
 
-  void mkAxioms(const Memory &other) const;
+  void mkAxioms(const Memory &other);
 
   static void resetGlobals();
   void syncWithSrc(const Memory &src);
@@ -313,12 +250,6 @@ public:
   void markByVal(unsigned bid);
   smt::expr mkInput(const char *name, const ParamAttrs &attrs);
   std::pair<smt::expr, smt::expr> mkUndefInput(const ParamAttrs &attrs) const;
-
-  std::string getLocalDisjProxyName() const;
-  smt::expr getLocalDisjProxyExpr(std::vector<smt::expr> domain) const;
-
-  // gets a proxy UF for the axioms used inside of quantifiers in combination with the propagator
-  smt::expr getProxy() const;
 
   struct PtrInput {
     StateValue val;
