@@ -4,7 +4,7 @@
 #include "tools/lazy_instantiation.h"
 #include "tools/transform.h"
 
-// #define VERBOSE
+//#define VERBOSE
 #ifdef VERBOSE
 #include <iostream>
 #define WriteEmptyLine std::cout << std::endl
@@ -91,18 +91,20 @@ void IntervalTree::add(const Interval &interval, unsigned instance, FixedComplex
 
 // sub user-propagator for local axioms
 MemoryAxiomPropagator::MemoryAxiomPropagator(smt::context* c, const Memory &src, const Memory &tgt, const std::unordered_map<std::string, std::vector<IR::State::MemoryBlockExpressions>*>& userFunctionsToInfo)
-        : PropagatorBase(c), src_memory(src), tgt_memory(tgt), userFunctionsToInfo(userFunctionsToInfo) {
+        : PropagatorBase(c), src_memory(src), tgt_memory(tgt), userFunctionsToInfo(userFunctionsToInfo), gen(smt::get_random_seed_int()), dist(0.5) {
   register_fixed();
   register_final();
   register_created();
+  //register_decide();
 }
 
 // user-propagator for global axioms
 MemoryAxiomPropagator::MemoryAxiomPropagator(Solver& s, const Memory &src, const Memory &tgt, const std::unordered_map<std::string, std::vector<IR::State::MemoryBlockExpressions>*>& userFunctionsToInfo)
-        : PropagatorBase(&s), src_memory(src), tgt_memory(tgt), userFunctionsToInfo(userFunctionsToInfo) {
+        : PropagatorBase(&s), src_memory(src), tgt_memory(tgt), userFunctionsToInfo(userFunctionsToInfo), gen(smt::get_random_seed_int()), dist(0.5) {
   register_fixed();
   register_final();
   register_created();
+  //register_decide();
 }
 
 MemoryAxiomPropagator::~MemoryAxiomPropagator() {
@@ -120,6 +122,7 @@ void MemoryAxiomPropagator::push() {
   fixedBlocksCnt.push(fixedBlock.size());
   collisions.push();
   overflows.push();
+  decisionLevel++;
 }
 
 void MemoryAxiomPropagator::pop(unsigned int num_scopes) {
@@ -143,26 +146,104 @@ void MemoryAxiomPropagator::pop(unsigned int num_scopes) {
     collisions.pop();
     overflows.pop();
   }
+  decisionLevel -= num_scopes;
+  assert(decisionLevel >= 0);
+  for (auto& prop : instantiate) {
+    if (decisionLevel < prop.first) {
+      prop.first = decisionLevel;
+      this->propagate(0, nullptr, prop.second);
+    }
+  }
+}
+
+enum CollisionResult {
+    No,
+    Yes,
+    Unknown
+};
+
+inline CollisionResult collidesReally(PropagatorBlock* const block1, PropagatorBlock* const block2, FixedBoolValue*& alive) {
+  // assume (block1, block2) is in collisions
+  assert(block1 && block2);
+  
+  if (block1->allocated->isAssigned() && !block1->allocated->getValue()) {
+    return No;
+  }
+  if (block2->allocated->isAssigned() && !block2->allocated->getValue()) {
+    return No;
+  }
+  
+  if (block1->alive.contains(block2)) {
+    alive = block1->alive.at(block2);
+  }
+  else if (block2->alive.contains(block1)) {
+    alive = block2->alive.at(block1);
+  }
+  else {
+    return No; // implicity no
+  }
+  
+  if (alive->isAssigned() && !alive->getValue()) {
+    return No;
+  }
+  
+  if (alive->isAssigned() && block1->allocated->isAssigned() && block2->allocated->isAssigned()) {
+    return Yes;
+  }
+  return Unknown;
+  
+}
+
+void MemoryAxiomPropagator::encodeCompletely(const std::vector<IR::State::MemoryBlockExpressions>* blockData, const std::vector<PropagatorBlock*>& b) {
+  AndExpr conj;
+  assert(blockData->size() == b.size());
+  WriteLine("Fallback: Encode completely");
+  std::cout << "Fallback: Encode completely" << std::endl;
+  for (unsigned i = 0; i < blockData->size(); i++) {
+    AndExpr conj2;
+    const IR::State::MemoryBlockExpressions& data = blockData->at(i);
+    const PropagatorBlock* block = b.at(i);
+    smt::expr addr = block->addr->expr;
+    smt::expr size = block->size->expr.zextOrTrunc(bits_ptr_address);
+    smt::expr align = block->align;
+    
+    for (const auto& candidate : data.collisionCandidates) {
+      PropagatorBlock* other = b.at(candidate.correspondingIndex);
+      const FixedBoolValue* alive = block->alive.at(other);
+      conj2.add(alive->expr.implies(disjointBlocks(addr, size, align, other->addr->expr, 
+                                                   other->size->expr.zextOrTrunc(bits_ptr_address), other->align))); 
+    }
+    conj.add(block->allocated->expr.implies(conj2()));
+  }
+  smt::expr e = conj();
+  instantiate.push_back(std::make_pair(decisionLevel, e));
+  this->propagate(0, nullptr, e);
+}
+
+inline CollisionResult collidesReally(PropagatorBlock* const block1, PropagatorBlock* const block2) {
+  FixedBoolValue* alive;
+  return collidesReally(block1, block2, alive);
 }
 
 void MemoryAxiomPropagator::truePredicateWrongArgumentsLocal(PropagatorBlock* block1, PropagatorBlock* block2) {
   assert(block1->local && block2->local);
-  if (block1->alive.contains(block2)) {
-    FixedBoolValue* aliveValue = block1->alive.at(block2);
-    if (aliveValue->isAssigned() && aliveValue->getValue()) {
-      smt::expr disjoint =
-        (block1->allocated->expr && aliveValue->expr).implies(
-          disjointBlocks(
-            block1->addr->expr, block1->size->expr.zextOrTrunc(bits_ptr_address), block1->align,
-            block2->addr->expr, block2->size->expr.zextOrTrunc(bits_ptr_address), block2->align
-          )
-        );
-      WriteLine(
-        "Interval intersection (local): " + Interval(block1->addr->getValue(), block1->addr->getValue() + block1->addr->getValue()).to_string() +
-        " and " + Interval(block2->addr->getValue(), block2->addr->getValue() + block2->addr->getValue()).to_string()
+  FixedBoolValue* aliveValue = nullptr;
+  if (collidesReally(block1, block2, aliveValue) == Yes) {
+    smt::expr disjoint =
+      (block1->allocated->expr && aliveValue->expr).implies(
+        disjointBlocks(
+          block1->addr->expr, block1->size->expr.zextOrTrunc(bits_ptr_address), block1->align,
+          block2->addr->expr, block2->size->expr.zextOrTrunc(bits_ptr_address), block2->align
+        )
       );
-      this->propagate(0, nullptr, block1->func->expr.implies(disjoint));
-    }
+    WriteLine(
+      "Interval intersection (local): " + Interval(block1->addr->getValue(), block1->addr->getValue() + block1->addr->getValue()).to_string() +
+      " and " + Interval(block2->addr->getValue(), block2->addr->getValue() + block2->addr->getValue()).to_string()
+    );
+    WriteLine("witness_false (local): " + block1->func->expr.implies(disjoint).toString());
+    smt::expr e = block1->func->expr.implies(disjoint);
+    instantiate.push_back(std::make_pair(decisionLevel, e));
+    this->propagate(0, nullptr, e);
   }
 }
 
@@ -177,37 +258,97 @@ void MemoryAxiomPropagator::truePredicateWrongArgumentsGlobal(PropagatorBlock* b
     "Interval intersection (global): " + Interval(block1->addr->getValue(), block1->addr->getValue() + block1->addr->getValue()).to_string() +
     " and " + Interval(block2->addr->getValue(), block2->addr->getValue() + block2->addr->getValue()).to_string()
   );
-  this->propagate(0, nullptr, block1->func->expr.implies(disjoint));
+  WriteLine("witness_false (global): " + block1->func->expr.implies(disjoint).toString());
+  smt::expr e = block1->func->expr.implies(disjoint);
+  instantiate.push_back(std::make_pair(decisionLevel, e));
+  this->propagate(0, nullptr, e);
 }
+
+struct NumericComparer {
+  inline bool operator()(const PropagatorBlock* const& v1, const PropagatorBlock* const& v2) {
+    assert(v1->addr->isAssigned());
+    assert(v2->addr->isAssigned());
+    return (v1->addr->getValue() < v2->addr->getValue());
+  }
+};
+
+static NumericComparer comparer;
 
 void MemoryAxiomPropagator::falsePredicateTrueArguments(unsigned instance, const FixedBoolValue* func) {
 
+  unsigned& ref = refinements.at(instance);
+  if (ref > func->containedBlocks.size() * (func->containedBlocks.size() / 2)) {
+    encodeCompletely(userFunctionsToInfo.at(func->expr.fn_name()), func->containedBlocks);
+    return;
+  }
+  else {
+    ref++;
+  }
+  
   std::vector<smt::expr> conflicting;
+  
+  std::vector<PropagatorBlock*> sorted;
+  
+  AndExpr andExpr;
+  
+  for (PropagatorBlock* const& block : func->containedBlocks) {
+    if (!block->allocated->isAssigned() || block->allocated->getValue()) {
+      sorted.push_back(block);
+    }
+    else if (!block->allocated->isConstant()) {
+      andExpr.add(!block->allocated->expr);
+    }
+    andExpr.add(block->addr->expr.add_no_uoverflow(block->size->expr.zextOrTrunc(bits_ptr_address)));
+  }
+  
+  std::sort(sorted.begin(), sorted.end(), comparer);
 
-  for (const std::pair<unsigned, unsigned> &collision : collisions.getValues(instance)) {
-    PropagatorBlock* block1 = blocks.at(collision.first);
-    PropagatorBlock* block2 = blocks.at(collision.second);
-    if (block1->alive.contains(block2)) {
-      if (!block1->alive.at(block2)->isAssigned() || block1->alive.at(block2)->getValue())
-        return; // there is either an alive value missing or we already found an invalid placement
-      if (!block1->alive.at(block2)->expr.isConst())
-        conflicting.push_back(block1->alive.at(block2)->expr);
+  
+  for (int i = 1; i < (int)sorted.size(); i++) {
+    PropagatorBlock*& block1 = sorted[i];
+    int j;
+    for (j = i - 1; j >= 0; j--) {
+      PropagatorBlock*& block2 = sorted[j];
+      
+      unsigned id1 = block1->id < block2->id ? block1->id : block2->id;
+      unsigned id2 = block1->id < block2->id ? block2->id : block1->id;
+      
+      if (!collisions.isContained(instance, std::make_pair(id1, id2))) {
+        // compare with this index
+        break;
+      }
+      
+      FixedBoolValue* alive;
+      if (block1->alive.contains(block2)) {
+        alive = block1->alive.at(block2);
+      }
+      else if (block2->alive.contains(block1)) {
+        alive = block2->alive.at(block1);
+      }
+      else {
+        // variables are on separate branches; assume implicitly false
+        continue;
+      }
+      assert(alive->isAssigned());
+      assert(!alive->getValue()); // there seems to be a collision
+      if (!alive->isConstant()) {
+        andExpr.add(!alive->expr);
+      }
     }
-    if (block2->alive.contains(block1)){
-      if (!block2->alive.at(block1)->isAssigned() || block2->alive.at(block1)->getValue())
-        return;
-      if (!block2->alive.at(block1)->expr.isConst())
-        conflicting.push_back(block2->alive.at(block1)->expr);
+    
+    if (j < 0) {
+      // actually 0 <= sorted[i].addr but this is redundant 
+      continue;
     }
+    
+    PropagatorBlock*& block2 = sorted[j];
+    
+    andExpr.add((block2->addr->expr + block2->size->expr.zextOrTrunc(bits_ptr_address)).ule(block1->addr->expr));
   }
-  unsigned argCnt = func->expr.getFnArgCnt();
-  for (unsigned i = 0; i < argCnt; i++) {
-    smt::expr arg = func->expr.getFnArg(i);
-    if (!arg.isConst())
-      conflicting.push_back(arg);
-  }
-  conflicting.push_back(func->expr);
-  this->conflict(conflicting.size(), conflicting.data());
+  WriteLine("witness_true: " + andExpr().implies(func->expr).toString());
+  smt::expr e = andExpr().implies(func->expr);
+  instantiate.push_back(std::make_pair(decisionLevel, e));
+  this->propagate(0, nullptr, e);
 }
 
 void MemoryAxiomPropagator::checkPredicate(unsigned instance, const FixedBoolValue* func) {
@@ -243,46 +384,47 @@ void MemoryAxiomPropagator::checkPredicate(unsigned instance, const FixedBoolVal
       assert(block1->func == func && block2->func == func);
       if (block1->local) {
         truePredicateWrongArgumentsLocal(block1, block2);
-        // We may add both (not symmetric because of alive-property)
-        truePredicateWrongArgumentsLocal(block2, block1);
       }
-      else{
+      else {
         // this is symmetric so we call it only once
         truePredicateWrongArgumentsGlobal(block1, block2);
       }
     }
-    // only for global axioms (otherwise always empty)
     for (auto& overflow : overflows.getValues(instance)) {
-      PropagatorBlock* block1 = blocks[overflow];
-      // global memory overflows
-      auto truncatedSize = block1->size->expr.zextOrTrunc(bits_ptr_address);
-      WriteLine("Added overflow: " + Interval(block1->addr->getValue(), block1->addr->getValue() + block1->addr->getValue()).to_string());
+      PropagatorBlock* block = blocks[overflow];
+      // memory overflows
+      auto truncatedSize = block->size->expr.zextOrTrunc(bits_ptr_address);
+      WriteLine("Added overflow: " + Interval(block->addr->getValue(), block->addr->getValue() + block->size->getValue()).to_string());
 
-      this->propagate(0, nullptr,
-        func->expr.implies(
-          Pointer::hasLocalBit()
-          // don't spill to local addr section
-          ? (block1->addr->expr + truncatedSize).extract(bits_ptr_address - 1, bits_ptr_address - 1) == 0
-          : block1->addr->expr.add_no_uoverflow(truncatedSize.zextOrTrunc(bits_ptr_address))
-        )
-      );
+      smt::expr e = func->expr.implies(
+                              !block->local && Pointer::hasLocalBit()
+                              // don't spill to local addr section
+                              ? (block->addr->expr + truncatedSize).extract(bits_ptr_address - 1, bits_ptr_address - 1) == 0
+                              : block->addr->expr.add_no_uoverflow(truncatedSize)
+                            );
+      this->propagate(0, nullptr, e);
     }
   }
   else {
     // We expect that the blocks are not disjoint
-    if (!overflows.empty(instance) || intervalTrees[instance].size() < func->containedBlocks.size())
+    if (!overflows.empty(instance) || intervalTrees[instance].size() < func->containedBlocks.size()) // some blocks are still unasssigned
       return;
+    
+    for (auto& conflict : collisions.getValues(instance)) {
+      auto& block1 = blocks[conflict.first];
+      auto& block2 = blocks[conflict.second];
+      if (collidesReally(block1, block2) != No) {
+        return;
+      }
+    }
     WriteLine("Encountered critical situation...");
-    // ... but the assignment is fine and all blocks are assigned
-    // we either not say d(addr1, size1, ..., addrn, sizen) => disj(addr1, ..., sizen)
-    // or just add a conflict between everything for memory reasons
     falsePredicateTrueArguments(instance, func);
   }
 }
 
 void MemoryAxiomPropagator::fixBlock(PropagatorBlock* block) {
 
-  if (!block->isComplete() || hasFixedBlock[block->instance].contains(block))
+  if (!block->isPartiallyComplete() || hasFixedBlock[block->instance].contains(block))
     return;
 
   Interval interval(block->addr->getValue(), block->addr->getValue() + block->size->getValue());
@@ -291,7 +433,6 @@ void MemoryAxiomPropagator::fixBlock(PropagatorBlock* block) {
   if (!block->local && Pointer::hasLocalBit()
       ? interval.end.extract(bits_ptr_address - 1) != 0
       : !(interval.end >= block->addr->getValue() && interval.end >= block->size->getValue())) {
-
     overflows.tryAdd(block->instance, block->id);
   } else {
     intervalTrees[block->instance].add(interval, block->instance, collisions);
@@ -303,8 +444,7 @@ void MemoryAxiomPropagator::fixBlock(PropagatorBlock* block) {
   }
 }
 
-void MemoryAxiomPropagator::fixed(const expr& ast, const expr &v) {
-
+void MemoryAxiomPropagator::fixed(const expr &ast, const expr &v) {
   WriteLine("Fixed " + ast.toString() + " to " + v.toString());
 
   FixedValue* value = currentInterpretation.at(ast);
@@ -328,7 +468,7 @@ void MemoryAxiomPropagator::fixed(const expr& ast, const expr &v) {
   }
 }
 
-FixedBoolValue* MemoryAxiomPropagator::registerBoolArgument(smt::expr argExpr, Argument argument) {
+FixedBoolValue* MemoryAxiomPropagator::registerBoolArgument(const smt::expr& argExpr, Argument argument) {
   auto it = currentInterpretation.find(argExpr);
   FixedBoolValue* value;
   if (it == currentInterpretation.end()) {
@@ -345,7 +485,7 @@ FixedBoolValue* MemoryAxiomPropagator::registerBoolArgument(smt::expr argExpr, A
   return value;
 }
 
-FixedNumericValue* MemoryAxiomPropagator::registerNumericArgument(smt::expr argExpr, Argument argument, unsigned size) {
+FixedNumericValue* MemoryAxiomPropagator::registerNumericArgument(const smt::expr& argExpr, Argument argument, unsigned size) {
   auto it = currentInterpretation.find(argExpr);
   FixedNumericValue* value;
   if (it == currentInterpretation.end()) {
@@ -364,12 +504,13 @@ FixedNumericValue* MemoryAxiomPropagator::registerNumericArgument(smt::expr argE
 
 void MemoryAxiomPropagator::created(const smt::expr &ast) {
   WriteLine("Created: " + ast.toString());
-
+  
   const std::vector<IR::State::MemoryBlockExpressions>* blockData = userFunctionsToInfo.at(ast.fn_name());
 
   intervalTrees.emplace_back();
   collisions.addInstance();
   overflows.addInstance();
+  refinements.push_back(0);
   hasFixedBlock.emplace_back();
 
   auto funcValue = new FixedBoolValue(Argument::Func, ast);
@@ -410,7 +551,13 @@ void MemoryAxiomPropagator::created(const smt::expr &ast) {
                                      addrValue, sizeValue, funcValue, allocatedValue, blockExpressions.alignExpr);
     blocks.push_back(block);
 
-    aliveStarts.push_back(i), i += blockExpressions.collisionCandidates.size();
+    aliveStarts.push_back(i);
+    for (auto& collisionCandidate : blockExpressions.collisionCandidates) {
+      if (!collisionCandidate.aliveExpr.isTrue() && 
+              !collisionCandidate.aliveExpr.isFalse()) {
+        i++;
+      }
+    }
 
     addrValue->containedBlocks.push_back(block);
     sizeValue->containedBlocks.push_back(block);
@@ -426,16 +573,41 @@ void MemoryAxiomPropagator::created(const smt::expr &ast) {
     unsigned aliveStart = aliveStarts[j];
     PropagatorBlock* block = blocks[prevBlockCnt + j];
 
-    for (unsigned k = 0; k < blockExpressions.collisionCandidates.size(); k++) {
-      FixedBoolValue* aliveValue = registerBoolArgument(ast.getFnArg(aliveStart + k), Argument::Alive);
-      block->alive.emplace(blocks[prevBlockCnt + blockExpressions.collisionCandidates[k].correspondingIndex], aliveValue);
+    unsigned k = 0;
+    
+    for (auto& collisionCandidate : blockExpressions.collisionCandidates) {
+      FixedBoolValue* aliveValue;
+      if (collisionCandidate.aliveExpr.isTrue() || 
+          collisionCandidate.aliveExpr.isFalse()) {
+        // all instances will be true/false
+        // the argument was only passed indirectly
+        aliveValue = registerBoolArgument(collisionCandidate.aliveExpr, Argument::Alive);
+      }
+      else {
+        aliveValue = registerBoolArgument(ast.getFnArg(aliveStart + k), Argument::Alive);
+        k++;
+      }
+      block->alive.emplace(blocks[prevBlockCnt + collisionCandidate.correspondingIndex], aliveValue);
       aliveValue->containedBlocks.push_back(block);
     }
   }
 }
 
+void MemoryAxiomPropagator::decide(const smt::expr &ast, const unsigned& bit, int& phase) {
+  //WriteLine("Split on " + ast.toString() + " (" + std::to_string(bit) + ")");
+  
+  FixedValue* value = currentInterpretation.at(ast);
+  assert(!value->isAssigned());
+  assert(!value->isConstant());
+  if (value->argument == Addr)
+    phase = dist(gen) ? 1 : -1;
+}
+
+
 void MemoryAxiomPropagator::final() {
     WriteLine("Final");
+    /*static int cnt = 0;
+    std::cout << "Final: " << ++cnt << std::endl;*/
 }
 
 PropagatorBase* MemoryAxiomPropagator::fresh(smt::context* c) {

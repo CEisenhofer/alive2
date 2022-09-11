@@ -1537,6 +1537,23 @@ expr Memory::disjoint_local_blocks(const Memory &m, const expr &addr,
   return disj;
 }
 
+static __attribute__((unused)) expr disjoint_local_blocks_eager(const Memory &m, const expr &addr,
+                                  const expr &sz, const expr &align,
+                                  const FunctionExpr &blk_addr) {
+  expr disj = true;
+
+  // Disjointness of block's address range with other local blocks
+  auto zero = expr::mkUInt(0, bits_for_offset);
+  for (auto &[sbid, addr0] : blk_addr) {
+    Pointer p2(m, Pointer::mkLongBid(sbid, true), zero);
+    disj &= p2.isBlockAlive()
+              .implies(disjointBlocks(addr, sz, align, p2.getAddress(),
+                                p2.blockSize().zextOrTrunc(bits_ptr_address),
+                                p2.blockAlignment()));
+  }
+  return disj;
+}
+
 void Memory::mkLocalDisjAddrAxioms(const expr &allocated, const expr &short_bid,
                                    const expr &size, const expr &align,
                                    unsigned align_bits) {
@@ -1576,6 +1593,11 @@ void Memory::mkLocalDisjAddrAxioms(const expr &allocated, const expr &short_bid,
   disjoint_local_blocks(*this, full_addr,
                             size, align,
                             allocated, local_blk_addr);
+  /*state->addPre(
+    allocated.implies(
+      disjoint_local_blocks_eager(*this, full_addr,
+                            size.zextOrTrunc(bits_ptr_address),
+                            align, local_blk_addr)));*/
 
   local_blk_addr.add(short_bid, move(blk_addr));
 }
@@ -1671,10 +1693,15 @@ void Memory::startLifetime(const expr &ptr_local) {
   Pointer p(*this, ptr_local);
   state->addUB(p.isLocal());
 
-  if (observesAddresses())
+  if (observesAddresses()) {
     disjoint_local_blocks(*this, p.getAddress(),
                             p.blockSize(), p.blockAlignment(),
                             true, local_blk_addr);
+    /*state->addPre(
+      disjoint_local_blocks_eager(*this, p.getAddress(),
+                            p.blockSize().zextOrTrunc(bits_ptr_address),
+                            p.blockAlignment(), local_blk_addr));*/
+    }
 
   store_bv(p, true, local_block_liveness, non_local_block_liveness, true);
 }

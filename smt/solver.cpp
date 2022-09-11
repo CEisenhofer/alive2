@@ -413,6 +413,17 @@ namespace smt {
             Z3_solver_propagate_created(ctx()(), _s->s, created_eh);
         }
     }
+    
+    static void decide_eh2(void* p, Z3_solver_callback cb, Z3_ast* ast, unsigned* bit, Z3_lbool* phase) {
+      smt::PropagatorBase::decide_eh(p, cb, ast, bit, (int*)phase);
+    }
+
+    void PropagatorBase::register_decide() {
+        m_decide_eh = [this](expr const &ast, unsigned const& bit, int& phase) { decide(ast, bit, phase); };
+        if (_s) {
+            Z3_solver_propagate_decide(ctx()(), _s->s, decide_eh2);
+        }
+    }
 
     void PropagatorBase::register_expr(const expr &e) {
         if (cb != nullptr)

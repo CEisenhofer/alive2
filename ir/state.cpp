@@ -1024,7 +1024,9 @@ smt::expr State::getProxy(const char* name, std::vector<MemoryBlockExpressions>&
         funcDomain.push_back(blocks[i].allocatedExpr);
       for (unsigned j = 0; j < blocks[i].collisionCandidates.size(); j++) {
         auto& collisionCandidate = blocks[i].collisionCandidates[j];
-        funcDomain.push_back(collisionCandidate.aliveExpr);
+        
+        if (!collisionCandidate.aliveExpr.isTrue() && !collisionCandidate.aliveExpr.isFalse())
+          funcDomain.push_back(collisionCandidate.aliveExpr);
 
         for (unsigned k = 0; k < blocks.size(); k++){
           if (blocks[k].addrExpr.eq(collisionCandidate.addrExpr) &&

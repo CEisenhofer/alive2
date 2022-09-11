@@ -9,12 +9,6 @@ endif()
 
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
-set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
-set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
-set(CMAKE_INSTALL_RPATH "/files/00-DBAI/home/ceisenhofer/gcc-11-1/lib64")
-set(CMAKE_BUILD_RPATH "/files/00-DBAI/home/ceisenhofer/gcc-11-1/lib64")
-set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
-
 if (MSVC)
   set(CMAKE_CXX_FLAGS                "/GL /EHsc /W2 ${CMAKE_CXX_FLAGS}")
   set(CMAKE_CXX_FLAGS_DEBUG          "/Od /Zi ${CMAKE_CXX_FLAGS_DEBUG}")
@@ -266,6 +260,24 @@ add_custom_target("check"
                   DEPENDS "alive"
                   USES_TERMINAL
                  )
+
+add_custom_target("opt2"
+                  COMMAND "/files/00-DBAI/home/ceisenhofer/llvm-project/llvm/out/bin/opt"
+                          "-load=/files/00-DBAI/home/ceisenhofer/tmp_alive2/cmake-build-release-uranus/tv/tv.so"
+                          "-enable-new-pm=0"
+                          "-tv"
+                          "-instcombine"
+                          "-tv"
+                          "-tv-smt-to=10000"
+                          "-tv-smt-stats"
+                          "-o"
+                          "/dev/null"
+                          "-tv-func=\"BZ2_bzWriteOpen\""
+                          "/files/00-DBAI/home/ceisenhofer/tmp_alive2/bzip2.sroa.ll"
+                  DEPENDS "alive"
+                  USES_TERMINAL
+                 )
+
 
 if (BUILD_TV)
   add_dependencies("check" "alive-tv" "tv")

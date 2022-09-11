@@ -140,10 +140,12 @@ class PropagatorBase {
   typedef std::function<void(expr const &, expr const &)> fixed_eh_t;
   typedef std::function<void(void)> final_eh_t;
   typedef std::function<void(expr const &)> created_eh_t;
+  typedef std::function<void(expr const &, unsigned const &, int &)> decide_eh_t;
 
   final_eh_t m_final_eh;
   fixed_eh_t m_fixed_eh;
   created_eh_t m_created_eh;
+  decide_eh_t m_decide_eh;
   context* _ctx;
   Solver* _s;
   std::vector<smt::context*> subcontexts;
@@ -199,11 +201,22 @@ class PropagatorBase {
   }
 
 public:
+    
+  static void decide_eh(void *p, Z3_solver_callback cb, Z3_ast *_ast, unsigned *bit, int *phase) {
+    scoped_cb _cb(p, cb);
+    expr ast(*_ast);
+    static_cast<PropagatorBase *>(p)->m_decide_eh(ast, *bit, *phase);
+  }
+    
   PropagatorBase(context* ctx);
   PropagatorBase(Solver *s);
 
   context& ctx() { return *_ctx; }
   Solver& s() { return *_s; }
+  
+  bool isSubPropagator() const {
+    return !subcontexts.empty();
+  }
 
   virtual void push() = 0;
   virtual void pop(unsigned num_scopes) = 0;
@@ -222,12 +235,16 @@ public:
   void register_final();
 
   void register_created();
+  
+  void register_decide();
 
-  virtual void fixed(expr const &, expr const &) {}
+  virtual void fixed(const expr&, const expr&) {}
 
   virtual void final() {}
 
-  virtual void created(expr const &) {}
+  virtual void created(const expr&) {}
+  
+  virtual void decide(const smt::expr&, const unsigned&, int&) {}
 
   void register_expr(expr const &e);
 

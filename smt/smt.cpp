@@ -42,6 +42,7 @@ void smt_initializer::destroy() {
 
 static string query_timeout = "10000";
 static string rand_seed = "0";
+static unsigned rand_seed_int = 0;
 
 void set_query_timeout(string ms) {
   query_timeout = move(ms);
@@ -49,6 +50,7 @@ void set_query_timeout(string ms) {
 
 void set_random_seed(string seed) {
   rand_seed = move(seed);
+  rand_seed_int = strtoul(rand_seed.c_str(), nullptr, 10);
 }
 
 const char* get_query_timeout() {
@@ -57,6 +59,10 @@ const char* get_query_timeout() {
 
 const char *get_random_seed() {
   return rand_seed.c_str();
+}
+
+unsigned get_random_seed_int() {
+  return rand_seed_int;
 }
 
 

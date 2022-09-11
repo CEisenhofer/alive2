@@ -210,7 +210,7 @@ class Memory {
   smt::expr blockRefined(const Pointer &src, const Pointer &tgt, unsigned bid,
                          std::set<smt::expr> &undef) const;
 
-  smt::expr disjoint_local_blocks(const Memory &m, const smt::expr &addr,
+  smt::expr __attribute__((unused)) disjoint_local_blocks(const Memory &m, const smt::expr &addr,
                                     const smt::expr &sz, const smt::expr &align,
                                     const smt::expr &allocated, const smt::FunctionExpr &blk_addr);
 

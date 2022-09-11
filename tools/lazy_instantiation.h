@@ -17,8 +17,9 @@
 #include "util/interval_tree.hpp"
 #include <memory>
 #include <ostream>
-#include <unordered_map>
+#include <random>
 #include <stack>
+#include <unordered_map>
 
 namespace tools {
 
@@ -142,18 +143,18 @@ struct PropagatorBlock {
                     FixedBoolValue* func, FixedBoolValue* allocated, const smt::expr& align)
       : align(align), addr(addr), size(size), func(func), allocated(allocated), id(id), instance(instance), local(local) { }
 
-    bool isComplete() const {
-      return addr->isAssigned() && size->isAssigned() && allocated->isAssigned();
+    bool isPartiallyComplete() const {
+      return addr->isAssigned() && size->isAssigned();
     }
 };
 
-template<typename T, typename _Hash = std::hash<T>>
+template<typename T, typename __Hash = std::hash<T>>
 class FixedComplex {
 
     // size of the (outer) vectors is the same
     std::vector<std::stack<size_t>> prevCnts;
     std::vector<std::vector<T>> list;
-    std::vector<std::unordered_set<T, _Hash>> set;
+    std::vector<std::unordered_set<T, __Hash>> set;
 
 public:
 
@@ -288,7 +289,10 @@ public:
 
   void remove(const Interval &interval) {
     auto it = this->find(interval);
-    assert(it != this->end());
+    if (it == this->end()) {
+      // assert(false); <-- this should not happen
+      return;
+    }
     erase(it);
   }
 
@@ -311,18 +315,27 @@ class MemoryAxiomPropagator : public smt::PropagatorBase {
   std::vector<std::unordered_set<PropagatorBlock*>> hasFixedBlock;
 
 
-  FixedComplex<std::pair<unsigned, unsigned>, HashPair> collisions;
+  FixedComplex<std::pair<unsigned, unsigned>, HashPair> collisions; // first block index is the smaller one
   FixedComplex<unsigned> overflows;
+  std::vector<unsigned> refinements;
 
   std::unordered_map<std::string, std::vector<IR::State::MemoryBlockExpressions>*> userFunctionsToInfo;
+  
+  int decisionLevel = 0;
+  std::vector<std::pair<int, smt::expr>> instantiate;
   PropagatorBase* subPropagator = nullptr;
+  
+  std::mt19937 gen;
+  std::bernoulli_distribution dist;
 
   void checkPredicate(unsigned instance, const FixedBoolValue* func); // In case we already know if the predicate should be true/false we propagate new expressions in case the predicate was not assigned properly
   void fixBlock(PropagatorBlock* block); // Adds the given block to the interval tree
 
-  FixedBoolValue* registerBoolArgument(smt::expr argExpr, Argument argument);
-  FixedNumericValue* registerNumericArgument(smt::expr argExpr, Argument argument, unsigned size);
+  FixedBoolValue* registerBoolArgument(const smt::expr& argExpr, Argument argument);
+  FixedNumericValue* registerNumericArgument(const smt::expr& argExpr, Argument argument, unsigned size);
 
+  void encodeCompletely(const std::vector<IR::State::MemoryBlockExpressions>* blockData, const std::vector<PropagatorBlock*>& b);
+  
   void truePredicateWrongArgumentsLocal(PropagatorBlock *block1, PropagatorBlock *block2);
   void truePredicateWrongArgumentsGlobal(PropagatorBlock *block1, PropagatorBlock *block2);
   void falsePredicateTrueArguments(unsigned int instance, const FixedBoolValue *func);
@@ -334,7 +347,7 @@ public:
   MemoryAxiomPropagator(smt::Solver& s, const IR::Memory &src, const IR::Memory &tgt, const std::unordered_map<std::string, std::vector<IR::State::MemoryBlockExpressions>*>& userFunctionsToInfo);
 
   ~MemoryAxiomPropagator() override;
-
+  
   void push() override;
 
   void pop(unsigned num_scopes) override;
@@ -344,6 +357,8 @@ public:
   void fixed(const smt::expr &ast, const smt::expr &value) override;
 
   void created(const smt::expr &ast) override;
+  
+  void decide(const smt::expr &ast, const unsigned& bit, int& phase) override;
 
   void final() override;
 
